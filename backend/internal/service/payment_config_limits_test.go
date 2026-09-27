@@ -277,6 +277,38 @@ func TestGetAvailableMethodLimitsIncludesEasyPayCustomMethodDisplayName(t *testi
 	require.Equal(t, "LDC Pay", limits.DisplayName)
 }
 
+func TestGetAvailableMethodLimitsSurfacesGlobalRechargeFeeRate(t *testing.T) {
+	ctx := context.Background()
+	client := newPaymentConfigServiceTestClient(t)
+
+	_, err := client.PaymentProviderInstance.Create().
+		SetProviderKey(payment.TypeStripe).
+		SetName("Stripe fee rate").
+		SetConfig("{}").
+		SetSupportedTypes(payment.TypeStripe).
+		SetEnabled(true).
+		Save(ctx)
+	require.NoError(t, err)
+
+	svc := &PaymentConfigService{
+		entClient: client,
+		settingRepo: &paymentConfigSettingRepoStub{
+			values: map[string]string{SettingRechargeFeeRate: "3.5"},
+		},
+	}
+
+	resp, err := svc.GetAvailableMethodLimits(ctx)
+	require.NoError(t, err)
+	limits, ok := resp.Methods[payment.TypeStripe]
+	require.True(t, ok)
+	require.Equal(t, 3.5, limits.FeeRate, "the global recharge fee rate must be reported with each method")
+
+	methodLimits, err := svc.GetMethodLimits(ctx, []string{payment.TypeStripe})
+	require.NoError(t, err)
+	require.Len(t, methodLimits, 1)
+	require.Equal(t, 3.5, methodLimits[0].FeeRate)
+}
+
 func TestPcComputeGlobalRange(t *testing.T) {
 	t.Parallel()
 

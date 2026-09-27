@@ -26,6 +26,7 @@ func (s *PaymentConfigService) GetAvailableMethodLimits(ctx context.Context) (*M
 	resp := &MethodLimitsResponse{
 		Methods: make(map[string]MethodLimits, len(typeInstances)),
 	}
+	feeRate := s.pcMethodFeeRate(ctx)
 	for pt, insts := range typeInstances {
 		currency, ok := s.pcAggregateMethodCurrency(insts)
 		if !ok {
@@ -34,10 +35,26 @@ func (s *PaymentConfigService) GetAvailableMethodLimits(ctx context.Context) (*M
 		ml := pcAggregateMethodLimits(pt, insts)
 		ml.DisplayName = s.pcAggregateMethodDisplayName(pt, insts)
 		ml.Currency = currency
+		ml.FeeRate = feeRate
 		resp.Methods[ml.PaymentType] = ml
 	}
 	resp.GlobalMin, resp.GlobalMax = pcComputeGlobalRange(resp.Methods)
 	return resp, nil
+}
+
+// pcMethodFeeRate returns the fee rate reported with per-method limits. Fees are
+// configured globally (RECHARGE_FEE_RATE) and applied to every order at creation,
+// so each method reports the same rate; a config lookup failure reports 0 so the
+// UI hides the fee hint instead of showing a stale or wrong value.
+func (s *PaymentConfigService) pcMethodFeeRate(ctx context.Context) float64 {
+	if s == nil || s.settingRepo == nil {
+		return 0
+	}
+	cfg, err := s.GetPaymentConfig(ctx)
+	if err != nil || cfg == nil {
+		return 0
+	}
+	return cfg.RechargeFeeRate
 }
 
 func (s *PaymentConfigService) pcApplyEnabledVisibleMethodInstances(ctx context.Context, typeInstances map[string][]*dbent.PaymentProviderInstance, instances []*dbent.PaymentProviderInstance) map[string][]*dbent.PaymentProviderInstance {
@@ -83,6 +100,7 @@ func (s *PaymentConfigService) GetMethodLimits(ctx context.Context, types []stri
 		return nil, fmt.Errorf("query provider instances: %w", err)
 	}
 	result := make([]MethodLimits, 0, len(types))
+	feeRate := s.pcMethodFeeRate(ctx)
 	for _, pt := range types {
 		var matching []*dbent.PaymentProviderInstance
 		for _, inst := range instances {
@@ -97,6 +115,7 @@ func (s *PaymentConfigService) GetMethodLimits(ctx context.Context, types []stri
 		ml := pcAggregateMethodLimits(pt, matching)
 		ml.DisplayName = s.pcAggregateMethodDisplayName(pt, matching)
 		ml.Currency = currency
+		ml.FeeRate = feeRate
 		result = append(result, ml)
 	}
 	return result, nil
