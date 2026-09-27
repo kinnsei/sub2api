@@ -171,6 +171,13 @@ export function decidePaymentLaunch(
     alipayMobilePrecreateDeepLink: result.alipay_mobile_precreate_deep_link === true,
   }, context.now)
 
+  // An Airwallex order without an intent_id can never be hosted by the Airwallex
+  // page; returning unhandled prevents it from falling through to the generic
+  // Stripe client_secret branch below (which would mislabel it as alipay).
+  if (visibleMethod === 'airwallex' && !baseState.intentId) {
+    return { kind: 'unhandled', paymentState: baseState, recovery: baseState }
+  }
+
   if (visibleMethod === 'airwallex' && baseState.clientSecret && baseState.intentId) {
     if (!context.airwallexRouteUrl) {
       return { kind: 'unhandled', paymentState: baseState, recovery: baseState }

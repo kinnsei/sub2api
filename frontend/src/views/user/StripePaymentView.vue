@@ -280,21 +280,71 @@ async function handleGenericPay() {
   }
 }
 
+const ORDER_POLL_INTERVAL_MS = 3000
+// Mirrors the 30-minute order TTL used by the other payment views when the
+// backend does not return an explicit expiry timestamp.
+const ORDER_EXPIRY_FALLBACK_MS = 30 * 60 * 1000
+const SUCCESS_ORDER_STATUSES = new Set(['COMPLETED', 'PAID', 'RECHARGING'])
+const FAILED_ORDER_STATUSES = new Set(['CANCELLED', 'EXPIRED', 'FAILED'])
+
 let pollTimer: ReturnType<typeof setInterval> | null = null
+let pollInFlight = false
+
+function stopPolling() {
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
+}
+
+function resolvePollingDeadline(): number {
+  const expiresAt = order.value?.expires_at
+  if (expiresAt) {
+    const parsed = new Date(expiresAt).getTime()
+    if (Number.isFinite(parsed)) return parsed
+  }
+  return Date.now() + ORDER_EXPIRY_FALLBACK_MS
+}
+
+// Terminal failure: stop polling and reuse the view's existing error surface.
+function failWechatPayment(status: string) {
+  stopPolling()
+  wechatQrUrl.value = ''
+  if (status === 'CANCELLED') {
+    stripeError.value = t('payment.qr.cancelled')
+  } else if (status === 'EXPIRED') {
+    stripeError.value = t('payment.qr.expired')
+  } else {
+    stripeError.value = t('payment.result.failed')
+  }
+}
 
 function startPolling() {
   const orderId = Number(route.query.order_id)
   if (!orderId) return
+  const deadline = resolvePollingDeadline()
   pollTimer = setInterval(async () => {
-    const o = await paymentStore.pollOrderStatus(orderId)
-    if (!o) return
-    if (o.status === 'COMPLETED' || o.status === 'PAID') {
-      if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
-      stripeSuccess.value = true
-      wechatQrUrl.value = ''
-      scheduleClose()
+    if (pollTimer === null) return
+    // Reentrancy guard: skip a tick when the previous (slow) request is still in flight.
+    if (pollInFlight) return
+    if (Date.now() >= deadline) {
+      failWechatPayment('EXPIRED')
+      return
     }
-  }, 3000)
+    pollInFlight = true
+    try {
+      const o = await paymentStore.pollOrderStatus(orderId)
+      if (pollTimer === null) return
+      if (!o) return
+      if (SUCCESS_ORDER_STATUSES.has(o.status)) {
+        stopPolling()
+        stripeSuccess.value = true
+        wechatQrUrl.value = ''
+        scheduleClose()
+      } else if (FAILED_ORDER_STATUSES.has(o.status)) {
+        failWechatPayment(o.status)
+      }
+    } finally {
+      pollInFlight = false
+    }
+  }, ORDER_POLL_INTERVAL_MS)
 }
 
 function scheduleClose() {

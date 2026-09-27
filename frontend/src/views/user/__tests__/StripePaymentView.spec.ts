@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, shallowMount } from '@vue/test-utils'
 
 const routeState = vi.hoisted(() => ({
@@ -94,28 +94,32 @@ function mountView() {
   })
 }
 
+function resetViewMocks() {
+  routerPush.mockReset()
+  getOrder.mockReset()
+  paymentStore.config = { stripe_publishable_key: 'pk_test' }
+  paymentStore.fetchConfig.mockReset().mockResolvedValue(undefined)
+  paymentStore.pollOrderStatus.mockReset()
+  loadStripe.mockReset().mockResolvedValue(stripeInstance)
+  stripeElements.create.mockReset().mockReturnValue(stripePaymentElement)
+  stripePaymentElement.mount.mockReset()
+  stripePaymentElement.on.mockReset().mockImplementation((event: string, callback: () => void) => {
+    if (event === 'ready') callback()
+  })
+  stripeInstance.elements.mockReset().mockReturnValue(stripeElements)
+  stripeInstance.confirmPayment.mockReset()
+  stripeInstance.confirmAlipayPayment.mockReset()
+  stripeInstance.confirmWechatPayPayment.mockReset()
+  window.localStorage.clear()
+}
+
 describe('StripePaymentView', () => {
   beforeEach(() => {
     routeState.query = {
       order_id: '42',
       client_secret: 'pi_secret_42',
     }
-    routerPush.mockReset()
-    getOrder.mockReset()
-    paymentStore.config = { stripe_publishable_key: 'pk_test' }
-    paymentStore.fetchConfig.mockReset().mockResolvedValue(undefined)
-    paymentStore.pollOrderStatus.mockReset()
-    loadStripe.mockReset().mockResolvedValue(stripeInstance)
-    stripeElements.create.mockReset().mockReturnValue(stripePaymentElement)
-    stripePaymentElement.mount.mockReset()
-    stripePaymentElement.on.mockReset().mockImplementation((event: string, callback: () => void) => {
-      if (event === 'ready') callback()
-    })
-    stripeInstance.elements.mockReset().mockReturnValue(stripeElements)
-    stripeInstance.confirmPayment.mockReset()
-    stripeInstance.confirmAlipayPayment.mockReset()
-    stripeInstance.confirmWechatPayPayment.mockReset()
-    window.localStorage.clear()
+    resetViewMocks()
   })
 
   it('本地恢复快照缺失时使用订单接口返回的 Stripe 币种展示金额', async () => {
@@ -130,5 +134,123 @@ describe('StripePaymentView', () => {
     expect(getOrder).toHaveBeenCalledWith(42)
     expect(loadStripe).toHaveBeenCalledWith('pk_test')
     expect(wrapper.text()).toContain(formatPaymentAmount(103, 'HKD', 'zh-CN'))
+  })
+})
+
+describe('StripePaymentView WeChat QR polling', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    routeState.query = {
+      order_id: '42',
+      client_secret: 'pi_secret_42',
+      method: 'wechat_pay',
+    }
+    resetViewMocks()
+    getOrder.mockResolvedValue({ data: orderFactory({ expires_at: '2099-01-01T00:00:00Z' }) })
+    stripeInstance.confirmWechatPayPayment.mockResolvedValue({
+      paymentIntent: {
+        status: 'requires_action',
+        next_action: {
+          wechat_pay_display_qr_code: { image_data_url: 'data:image/png;base64,wechat-qr' },
+        },
+      },
+    })
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  async function mountWechatView() {
+    const wrapper = mountView()
+    await flushPromises()
+    await vi.advanceTimersByTimeAsync(0)
+    await flushPromises()
+    return wrapper
+  }
+
+  it('stops polling and shows the success state once the order completes', async () => {
+    paymentStore.pollOrderStatus.mockResolvedValue(orderFactory({ status: 'COMPLETED' }))
+
+    const wrapper = await mountWechatView()
+    expect(wrapper.text()).toContain('payment.qr.scanWxpay')
+
+    await vi.advanceTimersByTimeAsync(3000)
+    await flushPromises()
+
+    expect(paymentStore.pollOrderStatus).toHaveBeenCalledWith(42)
+    expect(wrapper.text()).toContain('payment.result.success')
+
+    await vi.advanceTimersByTimeAsync(9000)
+    await flushPromises()
+    expect(paymentStore.pollOrderStatus).toHaveBeenCalledTimes(1)
+
+    wrapper.unmount()
+  })
+
+  it('treats RECHARGING as a successful terminal state', async () => {
+    paymentStore.pollOrderStatus.mockResolvedValue(orderFactory({ status: 'RECHARGING' }))
+
+    const wrapper = await mountWechatView()
+    await vi.advanceTimersByTimeAsync(3000)
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('payment.result.success')
+    expect(wrapper.text()).not.toContain('payment.qr.scanWxpay')
+
+    wrapper.unmount()
+  })
+
+  it.each([
+    ['CANCELLED', 'payment.qr.cancelled'],
+    ['EXPIRED', 'payment.qr.expired'],
+    ['FAILED', 'payment.result.failed'],
+  ])('stops polling and surfaces the failure state for %s', async (status, expectedCopy) => {
+    paymentStore.pollOrderStatus.mockResolvedValue(orderFactory({ status }))
+
+    const wrapper = await mountWechatView()
+    await vi.advanceTimersByTimeAsync(3000)
+    await flushPromises()
+
+    expect(wrapper.text()).toContain(expectedCopy)
+    expect(wrapper.text()).not.toContain('payment.qr.scanWxpay')
+    expect(wrapper.text()).toContain('payment.result.backToRecharge')
+
+    await vi.advanceTimersByTimeAsync(9000)
+    await flushPromises()
+    expect(paymentStore.pollOrderStatus).toHaveBeenCalledTimes(1)
+
+    wrapper.unmount()
+  })
+
+  it('stops polling once the order expiry has passed', async () => {
+    getOrder.mockResolvedValue({ data: orderFactory({ expires_at: '2000-01-01T00:00:00Z' }) })
+
+    const wrapper = await mountWechatView()
+    await vi.advanceTimersByTimeAsync(3000)
+    await flushPromises()
+
+    expect(paymentStore.pollOrderStatus).not.toHaveBeenCalled()
+    expect(wrapper.text()).toContain('payment.qr.expired')
+
+    wrapper.unmount()
+  })
+
+  it('falls back to a 30-minute expiry when the order has no expires_at', async () => {
+    getOrder.mockResolvedValue({ data: orderFactory({ expires_at: '' }) })
+
+    const wrapper = await mountWechatView()
+    await vi.advanceTimersByTimeAsync(30 * 60 * 1000)
+    await flushPromises()
+
+    expect(paymentStore.pollOrderStatus.mock.calls.length).toBeGreaterThan(0)
+    expect(wrapper.text()).toContain('payment.qr.expired')
+
+    const callsAtExpiry = paymentStore.pollOrderStatus.mock.calls.length
+    await vi.advanceTimersByTimeAsync(30 * 60 * 1000)
+    await flushPromises()
+    expect(paymentStore.pollOrderStatus.mock.calls.length).toBe(callsAtExpiry)
+
+    wrapper.unmount()
   })
 })

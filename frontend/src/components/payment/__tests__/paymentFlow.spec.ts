@@ -141,6 +141,40 @@ describe('decidePaymentLaunch', () => {
     expect(decision.paymentState.paymentEnv).toBe('demo')
   })
 
+  it('returns unhandled for an Airwallex order missing intent_id instead of a Stripe route', () => {
+    const decision = decidePaymentLaunch(createOrderResult({
+      client_secret: 'awx_cs',
+      currency: 'CNY',
+      country_code: 'CN',
+      out_trade_no: 'sub2_awx',
+    }), {
+      visibleMethod: 'airwallex',
+      orderType: 'balance',
+      isMobile: false,
+      airwallexRouteUrl: '/payment/airwallex?order_id=101',
+    })
+
+    expect(decision.kind).toBe('unhandled')
+    expect(decision.stripeMethod).toBeUndefined()
+    expect(decision.paymentState.intentId).toBe('')
+  })
+
+  it('keeps unhandled for an Airwallex order missing both client_secret and intent_id', () => {
+    const decision = decidePaymentLaunch(createOrderResult({
+      currency: 'CNY',
+      country_code: 'CN',
+      out_trade_no: 'sub2_awx',
+    }), {
+      visibleMethod: 'airwallex',
+      orderType: 'balance',
+      isMobile: false,
+      airwallexRouteUrl: '/payment/airwallex?order_id=101',
+    })
+
+    expect(decision.kind).toBe('unhandled')
+    expect(decision.stripeMethod).toBeUndefined()
+  })
+
   it('keeps hosted redirect metadata for recovery flows', () => {
     const decision = decidePaymentLaunch(createOrderResult({
       pay_url: 'https://pay.example.com/session/abc',

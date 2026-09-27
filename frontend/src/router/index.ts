@@ -327,18 +327,6 @@ const routes: RouteRecordRaw[] = [
     }
   },
   {
-    path: '/payment/qrcode',
-    name: 'PaymentQRCode',
-    component: () => import('@/views/user/PaymentQRCodeView.vue'),
-    meta: {
-      requiresAuth: true,
-      requiresAdmin: false,
-      title: 'Payment',
-      titleKey: 'payment.qr.scanToPay',
-      requiresPayment: true
-    }
-  },
-  {
     path: '/payment/result',
     name: 'PaymentResult',
     component: () => import('@/views/user/PaymentResultView.vue'),
@@ -371,17 +359,6 @@ const routes: RouteRecordRaw[] = [
       requiresAdmin: false,
       title: 'Airwallex Payment',
       titleKey: 'payment.airwallexPay',
-      requiresPayment: false
-    }
-  },
-  {
-    path: '/payment/stripe-popup',
-    name: 'StripePopup',
-    component: () => import('@/views/user/StripePopupView.vue'),
-    meta: {
-      requiresAuth: false,
-      requiresAdmin: false,
-      title: 'Payment',
       requiresPayment: false
     }
   },
