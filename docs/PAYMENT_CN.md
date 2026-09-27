@@ -25,6 +25,7 @@ Sub2API 内置支付系统，支持用户自助充值，无需部署独立的支
 | **支付宝官方** | 桌面二维码扫码、移动端支付宝跳转或当面付唤起 | 直接对接支付宝开放平台；移动端默认 WAP，也可选择当面付二维码唤起支付宝 |
 | **微信官方** | Native 扫码、H5、公众号/JSAPI 支付 | 直接对接微信支付 APIv3，按终端环境自动分流 |
 | **Stripe** | 银行卡、支付宝、微信支付、Link 等 | 国际支付，支持多币种 |
+| **Airwallex（空中云汇）** | 银行卡、支付宝、微信支付等 | 通过 Airwallex Components SDK 托管收银台支付，支持多币种 |
 
 > 支付宝官方 / 微信官方与易支付可以同时作为后台服务商实例存在，但前台始终只展示 `支付宝`、`微信支付` 两个可见按钮。管理员需要分别为这两个按钮选择唯一支付来源：官方或易支付。官方渠道直接对接 API，资金直达商户账户，手续费更低；易支付通过第三方平台聚合，接入门槛更低。
 
@@ -64,6 +65,12 @@ Sub2API 内置支付系统，支持用户自助充值，无需部署独立的支
 | **订单超时时间** | 订单超时分钟数，至少 1 分钟 | 30 |
 | **最大待支付订单数** | 同一用户最大并行待支付订单数 | 3 |
 | **负载均衡策略** | 多服务商实例时的选择策略 | 轮询 |
+| **余额充值倍率** | 每单位支付金额到账的余额（1 表示 1:1） | 1 |
+| **禁用余额充值** | 完全隐藏余额充值入口 | 关闭 |
+| **订阅美元兑人民币汇率** | 以人民币扣款时套餐价格的显式换算（0 表示按套餐原价扣款） | 0 |
+| **充值手续费率** | 每笔订单额外收取的百分比手续费（0-100） | 0 |
+| **支付宝强制二维码支付** | 支付宝始终使用二维码/跳转，不走 App 唤起 | 关闭 |
+| **支付宝移动端当面付唤起** | 移动端支付宝订单走 `alipay.trade.precreate` 并尝试唤起 App（需已开通当面付） | 关闭 |
 
 ### 支付宝移动端当面付唤起
 
@@ -81,6 +88,8 @@ Sub2API 内置支付系统，支持用户自助充值，无需部署独立的支
 - **微信支付**：后台启用后，需要额外指定该按钮路由到 `微信官方` 或 `易支付微信`
 - 同一个可见支付方式在同一时刻只能路由到一个来源
 - 支付来源未选择时，即使对应按钮被开启，前台也不会暴露该支付方式
+
+支付来源与开关分别保存在 `payment_visible_method_alipay_source` / `payment_visible_method_wxpay_source`（取值 `official_alipay`、`easypay_alipay`、`official_wxpay`、`easypay_wxpay`）以及对应的 `payment_visible_method_*_enabled` 配置项中。请通过管理端设置接口（`PUT /api/v1/admin/settings`）写入；支付设置标签页暂未提供对应的可视化控件。
 
 ### 负载均衡策略
 
@@ -119,6 +128,8 @@ Sub2API 内置支付系统，支持用户自助充值，无需部署独立的支
 ### EasyPay（易支付）
 
 兼容任何 EasyPay 协议的支付服务商。
+
+> 易支付协议只提供下单、订单查询（`act=order`）与退款（`act=refund`），**没有撤单接口，也没有退款状态查询接口**：取消易支付订单只在本地关闭，`REFUND_PENDING` 状态的易支付退款需要在聚合平台自己的后台确认。
 
 | 参数 | 说明 | 必填 |
 |------|------|------|
@@ -159,8 +170,21 @@ Sub2API 内置支付系统，支持用户自助充值，无需部署独立的支
 | 参数 | 说明 | 必填 |
 |------|------|------|
 | **Secret Key** | Stripe 密钥（`sk_live_...` 或 `sk_test_...`） | 是 |
-| **Publishable Key** | Stripe 可公开密钥（`pk_live_...` 或 `pk_test_...`） | 是 |
-| **Webhook Secret** | Stripe Webhook 签名密钥（`whsec_...`） | 是 |
+| **Publishable Key** | Stripe 可公开密钥（`pk_live_...` 或 `pk_test_...`） | 否——仅内嵌 Stripe Payment Element 时需要 |
+| **Webhook Secret** | Stripe Webhook 签名密钥（`whsec_...`） | 是——缺少时无法校验回调签名 |
+
+### Airwallex（空中云汇）
+
+通过 Airwallex Components SDK 跳转到托管收银台支付。下单后返回支付意图 ID 与 client secret，前端跳转收银台，支付结果由 Webhook 确认。
+
+| 参数 | 说明 | 必填 |
+|------|------|------|
+| **Client ID** | Airwallex API 客户端 ID | 是 |
+| **API Key** | Airwallex API 密钥 | 是 |
+| **Webhook Secret** | Airwallex Webhook 签名密钥（HMAC-SHA256） | 是 |
+| **API 地址** | Airwallex API 基础地址 | 是 |
+| **Account ID** | Airwallex 账户 ID，用于服务商快照校验 | 否 |
+| **币种 / 国家代码** | 收银台币种（默认 CNY）与国家代码（默认 CN） | 否 |
 
 ---
 
@@ -203,6 +227,7 @@ Sub2API 内置支付系统，支持用户自助充值，无需部署独立的支
 | **支付宝官方** | `https://your-domain.com/api/v1/payment/webhook/alipay` |
 | **微信官方** | `https://your-domain.com/api/v1/payment/webhook/wxpay` |
 | **Stripe** | `https://your-domain.com/api/v1/payment/webhook/stripe` |
+| **Airwallex** | `https://your-domain.com/api/v1/payment/webhook/airwallex` |
 
 > 将 `your-domain.com` 替换为你的实际域名。EasyPay / 支付宝 / 微信的回调地址在添加服务商时自动填入，无需手动配置。
 
@@ -213,6 +238,14 @@ Sub2API 内置支付系统，支持用户自助充值，无需部署独立的支
 3. 添加端点，填写回调地址
 4. 订阅事件：`payment_intent.succeeded`、`payment_intent.payment_failed`
 5. 将生成的 Webhook Secret（`whsec_...`）填入服务商配置
+
+### Airwallex Webhook 设置
+
+1. 登录 Airwallex 管理后台
+2. 进入 **Developer → Webhooks**
+3. 添加端点，填写回调地址
+4. 订阅事件：`payment_intent.succeeded`、`payment_intent.cancelled`
+5. 将签名密钥填入服务商的 **Webhook Secret** 字段
 
 ### 注意事项
 
@@ -258,15 +291,38 @@ Sub2API 内置支付系统，支持用户自助充值，无需部署独立的支
 | `EXPIRED` | 已过期，超时未支付 |
 | `CANCELLED` | 已取消，用户主动取消 |
 | `FAILED` | 充值失败，可管理员重试 |
-| `REFUND_REQUESTED` | 已申请退款 |
+| `REFUND_REQUESTED` | 用户已申请退款，等待管理员审核 |
 | `REFUNDING` | 退款处理中 |
-| `REFUNDED` | 已退款 |
+| `REFUND_PENDING` | 网关已受理但尚未结算，管理员可查询退款状态 |
+| `PARTIALLY_REFUNDED` | 已部分退款，剩余金额仍可继续退款 |
+| `REFUNDED` | 已全额退款（终态） |
+| `REFUND_FAILED` | 网关退款失败或已回滚，可在订单列表重试 |
 
 ### 超时与兜底
 
 - 订单超时后，后台任务会先查询上游支付状态再标记过期
-- 如果用户实际已支付但回调延迟，系统会通过查询补单
-- 后台任务每 60 秒执行一次超时检查
+- 若该查询失败，订单保持待支付并在下一轮重试：状态无法确认时绝不取消或过期订单
+- 如果用户实际已支付但回调延迟，系统会通过查询补单（支付宝、微信、易支付的待支付订单都会参与对账）
+- 只要上游确认已支付，即使回调在订单过期后才到达也会正常入账；这类补单会在订单审计日志中记录 `ORDER_RECOVERED`
+- 卡在 `PAID` / `RECHARGING` / `FAILED` 的订单（例如进程重启导致）会自动重试履约，直到达到失败次数上限后保留为 `FAILED` 等待人工处理
+- 后台任务每 60 秒执行一次
+
+---
+
+## 退款
+
+退款以管理端订单列表为主，用户可选发起退款申请：
+
+1. 当服务商实例开启 **允许用户退款** 且用户余额足以扣回时，用户可对已完成的**余额**订单发起退款申请。订单进入 `REFUND_REQUESTED`，此时不会调用支付网关。
+2. 管理员审核订单后执行退款（按余额或订阅扣减，无法自动规划扣减时提供强制选项）。
+3. 网关返回结果决定最终状态：`REFUNDED` / `PARTIALLY_REFUNDED`、`REFUND_PENDING`（管理员可稍后查询状态）或 `REFUND_FAILED`（扣减回滚，订单恢复原状态）。
+
+注意事项：
+
+- **部分退款可重复进行。** 可退金额为订单金额减去已成功退款金额，因此可以再退剩余部分，全部退完后订单才进入 `REFUNDED`。
+- **按上游交易号退款的渠道（Stripe、Airwallex）在订单缺少交易号时会直接拒绝**，并记录 `REFUND_NO_TRADE_NO` 审计，不会伪造本地“退款成功”；按商户订单号退款的渠道（支付宝、微信、易支付）不受影响。
+- 退款可按实例关闭（**退款控制**），且未绑定服务商实例的历史订单无法退款。
+- **易支付不支持退款状态查询**，因此 `REFUND_PENDING` 的易支付退款无法在管理端订单列表确认（接口返回 `REFUND_QUERY_UNSUPPORTED`），请到聚合平台后台核对。支付宝、微信、Stripe、Airwallex 均支持退款状态查询。
 
 ---
 
@@ -282,7 +338,7 @@ Sub2API 内置支付系统，支持用户自助充值，无需部署独立的支
 | 支付方式 | EasyPay、支付宝、微信、Stripe | 相同 |
 | 配置方式 | 环境变量 + 独立管理后台 | Sub2API 管理后台内统一配置 |
 | 充值对接 | 通过 Admin API 回调 | 内部直接处理，更可靠 |
-| 订阅套餐 | 支持 | 暂不支持（计划中） |
+| 订阅套餐 | 支持 | 支持（管理后台 → 订单 → 支付套餐） |
 | 订单管理 | 独立管理界面 | 集成在 Sub2API 管理后台 |
 
 ### 迁移步骤

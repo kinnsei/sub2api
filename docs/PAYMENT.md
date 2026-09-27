@@ -25,6 +25,7 @@ Sub2API has a built-in payment system that enables user self-service top-up with
 | **Alipay (Direct)** | Desktop QR code, mobile Alipay redirect | Direct integration with Alipay Open Platform, returning desktop QR codes and mobile WAP/app launch links |
 | **WeChat Pay (Direct)** | Native QR, H5, MP/JSAPI Pay | Direct integration with WeChat Pay APIv3 with environment-aware routing |
 | **Stripe** | Card, Alipay, WeChat Pay, Link, etc. | International payments, multi-currency support |
+| **Airwallex** | Card, Alipay, WeChat Pay, etc. | Hosted checkout through the Airwallex Components SDK, multi-currency support |
 
 > Alipay/WeChat Pay direct and EasyPay can both exist as backend provider instances, but the frontend always exposes only two visible buttons: `Alipay` and `WeChat Pay`. Admins choose exactly one source for each visible method: direct or EasyPay. Direct channels connect to payment APIs directly with lower fees; EasyPay aggregates through third-party platforms with easier setup.
 
@@ -64,6 +65,12 @@ Configure the following in Admin Dashboard **Settings → Payment Settings**:
 | **Order Timeout** | Order timeout in minutes (minimum 1) | 30 |
 | **Max Pending Orders** | Maximum concurrent pending orders per user | 3 |
 | **Load Balance Strategy** | Strategy for selecting provider instances | Round Robin |
+| **Balance Recharge Multiplier** | Credits granted per unit paid (1 = 1:1) | 1 |
+| **Balance Payment Disabled** | Hide the balance top-up option entirely | Off |
+| **Subscription USD to CNY Rate** | Explicit opt-in conversion for plan prices charged in CNY (0 = charge the plan price as-is) | 0 |
+| **Recharge Fee Rate** | Percentage fee added on top of every order (0-100) | 0 |
+| **Alipay Force QR Code** | Always use QR/redirect instead of the in-app launch for Alipay | Off |
+| **Alipay Mobile Precreate Deep Link** | Mobile Alipay orders use `alipay.trade.precreate` plus an app launch attempt (requires Face-to-Face payment to be enabled) | Off |
 
 ### Frontend Visible Method Routing
 
@@ -73,6 +80,8 @@ The current payment UX keeps the frontend method list unified and does not expos
 - **WeChat Pay**: when enabled, this button must be routed to either `WeChat Pay (Direct)` or `EasyPay WeChat`
 - Each visible method can route to only one source at a time
 - If a visible method is enabled without a selected source, the frontend will not expose that method
+
+The source and enable flag are stored in the `payment_visible_method_alipay_source` / `payment_visible_method_wxpay_source` settings (`official_alipay`, `easypay_alipay`, `official_wxpay`, `easypay_wxpay`) together with the matching `payment_visible_method_*_enabled` flag. Set them through the admin settings API (`PUT /api/v1/admin/settings`); the payment tab does not expose a dedicated control for them yet.
 
 ### Load Balance Strategies
 
@@ -111,6 +120,8 @@ Each provider type requires different credentials. Select the type when adding a
 ### EasyPay
 
 Compatible with any payment service that implements the EasyPay protocol.
+
+> The EasyPay protocol only exposes payment creation, status query (`act=order`) and refund (`act=refund`). It has **no cancel endpoint and no refund-status query**, so cancelling an EasyPay order only closes it locally and a `REFUND_PENDING` EasyPay refund must be confirmed in the aggregator's own dashboard.
 
 | Parameter | Description | Required |
 |-----------|-------------|----------|
@@ -151,8 +162,21 @@ International payment platform supporting multiple payment methods and currencie
 | Parameter | Description | Required |
 |-----------|-------------|----------|
 | **Secret Key** | Stripe secret key (`sk_live_...` or `sk_test_...`) | Yes |
-| **Publishable Key** | Stripe publishable key (`pk_live_...` or `pk_test_...`) | Yes |
-| **Webhook Secret** | Stripe Webhook signing secret (`whsec_...`) | Yes |
+| **Publishable Key** | Stripe publishable key (`pk_live_...` or `pk_test_...`) | No - required only for the embedded Stripe Payment Element |
+| **Webhook Secret** | Stripe Webhook signing secret (`whsec_...`) | Yes - webhook signature verification fails without it |
+
+### Airwallex
+
+Hosted checkout through the Airwallex Components SDK. Orders return a payment intent id plus a client secret; the frontend redirects to the Airwallex checkout page and the payment is confirmed by webhook.
+
+| Parameter | Description | Required |
+|-----------|-------------|----------|
+| **Client ID** | Airwallex API client id | Yes |
+| **API Key** | Airwallex API key | Yes |
+| **Webhook Secret** | Airwallex webhook signing secret (HMAC-SHA256) | Yes |
+| **API Base URL** | Airwallex API base address | Yes |
+| **Account ID** | Airwallex account id, echoed in provider snapshot checks | No |
+| **Currency / Country Code** | Checkout currency (default CNY) and country code (default CN) | No |
 
 ---
 
@@ -195,6 +219,7 @@ When adding a provider, the system auto-generates callback URLs from your site d
 | **Alipay (Direct)** | `https://your-domain.com/api/v1/payment/webhook/alipay` |
 | **WeChat Pay (Direct)** | `https://your-domain.com/api/v1/payment/webhook/wxpay` |
 | **Stripe** | `https://your-domain.com/api/v1/payment/webhook/stripe` |
+| **Airwallex** | `https://your-domain.com/api/v1/payment/webhook/airwallex` |
 
 > Replace `your-domain.com` with your actual domain. For EasyPay / Alipay / WeChat Pay, the callback URL is auto-filled when adding the provider — no manual configuration needed.
 
@@ -205,6 +230,14 @@ When adding a provider, the system auto-generates callback URLs from your site d
 3. Add an endpoint with the callback URL
 4. Subscribe to events: `payment_intent.succeeded`, `payment_intent.payment_failed`
 5. Copy the generated Webhook Secret (`whsec_...`) to your provider configuration
+
+### Airwallex Webhook Setup
+
+1. Log in to the Airwallex web app
+2. Go to **Developer → Webhooks**
+3. Add an endpoint with the callback URL
+4. Subscribe to `payment_intent.succeeded` and `payment_intent.cancelled`
+5. Copy the signing secret into the provider's **Webhook Secret** field
 
 ### Important Notes
 
@@ -250,15 +283,38 @@ User selects amount and payment method
 | `EXPIRED` | Timed out without payment |
 | `CANCELLED` | Cancelled by user |
 | `FAILED` | Balance credit failed, admin can retry |
-| `REFUND_REQUESTED` | Refund requested |
+| `REFUND_REQUESTED` | Refund requested by the user, awaiting admin review |
 | `REFUNDING` | Refund in progress |
-| `REFUNDED` | Refund completed |
+| `REFUND_PENDING` | Gateway accepted the refund but has not settled it yet; an admin can query the status |
+| `PARTIALLY_REFUNDED` | Part of the order was refunded; the remainder can still be refunded |
+| `REFUNDED` | Fully refunded (terminal) |
+| `REFUND_FAILED` | Refund failed at the gateway or was rolled back; retry from the order list |
 
 ### Timeout and Fallback
 
 - Before marking an order as expired, the background job queries the upstream payment status first
-- If the user has actually paid but the callback was delayed, the system will reconcile automatically
-- The background job runs every 60 seconds to check for timed-out orders
+- If that query fails, the order is left pending and retried on the next cycle: an unverified status never cancels or expires an order
+- If the user has actually paid but the callback was delayed, the system reconciles automatically (Alipay, WeChat Pay and EasyPay pending orders are all re-queried)
+- A provider-confirmed payment is always credited, even when the notification arrives after the order expired; late recoveries are recorded as `ORDER_RECOVERED` in the order audit log
+- Orders stuck in `PAID` / `RECHARGING` / `FAILED` (for example after a restart) are retried automatically until the failure budget is exhausted, after which they stay `FAILED` for manual review
+- The background job runs every 60 seconds
+
+---
+
+## Refunds
+
+Refunds are driven from the admin order list, with an optional user-initiated request:
+
+1. A user can request a refund for a completed **balance** order when the provider instance has **Allow user refund** enabled and their balance covers the amount. The order moves to `REFUND_REQUESTED`; no gateway call happens yet.
+2. An admin reviews the order and runs the refund (balance or subscription deduction, with a force option when the deduction cannot be planned automatically).
+3. The gateway call result decides the outcome: `REFUNDED` / `PARTIALLY_REFUNDED`, `REFUND_PENDING` (the admin can query the status later), or `REFUND_FAILED` (the deduction is rolled back and the order returns to its previous status).
+
+Notes:
+
+- **Partial refunds can be repeated.** The refundable amount is the order amount minus everything already refunded, so a second refund for the remainder is allowed and only then moves the order to `REFUNDED`.
+- **Providers that refund by upstream trade number (Stripe, Airwallex) are refused when the order has no recorded trade number.** The attempt is logged as `REFUND_NO_TRADE_NO` and no local-only "successful" refund is recorded; providers that refund by merchant order id (Alipay, WeChat Pay, EasyPay) are unaffected.
+- Refunds can be disabled per provider instance (**Refund control**), and legacy orders without a pinned provider instance cannot be refunded.
+- **EasyPay has no refund-status query**, so a pending EasyPay refund cannot be finalized from the admin list (the API returns `REFUND_QUERY_UNSUPPORTED`); confirm it in the aggregator's dashboard. Alipay, WeChat Pay, Stripe and Airwallex all support status queries.
 
 ---
 
@@ -274,7 +330,7 @@ If you previously used [Sub2ApiPay](https://github.com/touwaeriol/sub2apipay) as
 | Payment Methods | EasyPay, Alipay, WeChat, Stripe | Same |
 | Configuration | Environment variables + separate admin UI | Unified in Sub2API admin dashboard |
 | Top-up Integration | Via Admin API callback | Internal processing, more reliable |
-| Subscription Plans | Supported | Not yet (planned) |
+| Subscription Plans | Supported | Supported (admin -> Orders -> Payment Plans) |
 | Order Management | Separate admin interface | Integrated in Sub2API admin dashboard |
 
 ### Migration Steps
