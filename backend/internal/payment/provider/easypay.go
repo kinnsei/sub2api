@@ -34,6 +34,13 @@ const (
 )
 
 // EasyPay implements payment.Provider for the EasyPay aggregation platform.
+//
+// Protocol surface: `act=order` (payment status query) and `act=refund` only.
+// The EasyPay protocol exposes no cancel endpoint and no refund-status query, so
+// this provider intentionally does not implement payment.CancelableProvider or
+// payment.RefundQueryProvider; the service layer degrades gracefully for both
+// (local cancel without an upstream close, and a clear
+// REFUND_QUERY_UNSUPPORTED error when an admin tries to query a pending refund).
 type EasyPay struct {
 	instanceID string
 	config     map[string]string
@@ -220,7 +227,7 @@ func (e *EasyPay) createAPIPayment(ctx context.Context, req payment.CreatePaymen
 // came back verbatim, and nothing downstream repairs it —
 // sanitizeCreatePaymentResponseDetails only strips NUL bytes before the value is
 // persisted to pay_url/qr_code. The frontend then feeds qr_code straight into
-// QRCode.toCanvas (PaymentQRCodeView.renderQR), so a relative path becomes a QR
+// QRCode.toCanvas (PaymentStatusPanel.renderQR), so a relative path becomes a QR
 // whose payload is a bare path: WeChat renders it as text, and pay_url resolves
 // against the gateway's own domain and 404s.
 //
@@ -601,3 +608,11 @@ func easyPaySign(params map[string]string, pkey string) string {
 func easyPayVerifySign(params map[string]string, pkey string, sign string) bool {
 	return hmac.Equal([]byte(easyPaySign(params, pkey)), []byte(sign))
 }
+
+// Ensure interface compliance. EasyPay deliberately does not implement
+// payment.CancelableProvider or payment.RefundQueryProvider: the EasyPay
+// protocol has no cancel and no refund-status query endpoint.
+var (
+	_ payment.Provider                 = (*EasyPay)(nil)
+	_ payment.MerchantIdentityProvider = (*EasyPay)(nil)
+)

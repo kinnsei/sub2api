@@ -58,7 +58,6 @@ const (
 // Payment notification status values.
 const (
 	NotificationStatusSuccess = "success"
-	NotificationStatusPaid    = "paid"
 )
 
 // Provider-level status constants returned by provider implementations
@@ -245,4 +244,17 @@ type CancelableProvider interface {
 // derived from provider configuration for snapshot consistency checks.
 type MerchantIdentityProvider interface {
 	MerchantIdentityMetadata() map[string]string
+}
+
+// TradeNoRefundProvider is implemented by providers whose Refund call needs the
+// upstream trade number (payment intent id) and cannot refund by merchant order
+// id alone. Providers that do not implement it are assumed to refund by the
+// merchant out_trade_no.
+//
+// The service layer uses this to refuse a refund before calling the gateway when
+// the order has no recorded trade number, instead of silently reporting success.
+type TradeNoRefundProvider interface {
+	Provider
+	// RefundRequiresTradeNo reports whether Refund needs RefundRequest.TradeNo.
+	RefundRequiresTradeNo() bool
 }

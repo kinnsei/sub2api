@@ -72,6 +72,10 @@ func (s *Stripe) MerchantIdentityMetadata() map[string]string {
 	return map[string]string{"currency": s.currency()}
 }
 
+// RefundRequiresTradeNo reports that Stripe refunds are issued against the
+// PaymentIntent id recorded in the order's trade number.
+func (s *Stripe) RefundRequiresTradeNo() bool { return true }
+
 func (s *Stripe) currency() string {
 	if s == nil {
 		return payment.DefaultPaymentCurrency
@@ -350,4 +354,5 @@ var (
 	_ payment.Provider                 = (*Stripe)(nil)
 	_ payment.CancelableProvider       = (*Stripe)(nil)
 	_ payment.MerchantIdentityProvider = (*Stripe)(nil)
+	_ payment.TradeNoRefundProvider    = (*Stripe)(nil)
 )

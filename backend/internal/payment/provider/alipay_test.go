@@ -444,3 +444,231 @@ func TestParseAlipayAmount(t *testing.T) {
 		t.Fatal("expected error when no valid amount field exists")
 	}
 }
+
+func TestAlipayRefundRequestNo(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		orderID string
+		amount  string
+		want    string
+	}{
+		{
+			name:    "sanitizes dots and dashes from amount",
+			orderID: "sub2_1001",
+			amount:  "12.34",
+			want:    "sub2_1001-refund-1234",
+		},
+		{
+			name:    "falls back to order id when amount is empty",
+			orderID: "sub2_1001",
+			amount:  "",
+			want:    "sub2_1001-refund",
+		},
+		{
+			name:    "falls back to order id when amount has no digits",
+			orderID: "sub2_1001",
+			amount:  "--",
+			want:    "sub2_1001-refund",
+		},
+		{
+			name:    "empty order id returns empty",
+			orderID: "  ",
+			amount:  "12.34",
+			want:    "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := alipayRefundRequestNo(tt.orderID, tt.amount); got != tt.want {
+				t.Fatalf("alipayRefundRequestNo(%q, %q) = %q, want %q", tt.orderID, tt.amount, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestAlipayRefundUsesDeterministicRequestNo(t *testing.T) {
+	origRefund := alipayTradeRefund
+	t.Cleanup(func() { alipayTradeRefund = origRefund })
+
+	var outRequestNos []string
+	alipayTradeRefund = func(_ context.Context, _ *alipay.Client, param alipay.TradeRefund) (*alipay.TradeRefundRsp, error) {
+		if param.OutTradeNo == "" {
+			t.Error("OutTradeNo must not be empty")
+		}
+		outRequestNos = append(outRequestNos, param.OutRequestNo)
+		return &alipay.TradeRefundRsp{
+			Error:      alipay.Error{Code: alipay.CodeSuccess},
+			FundChange: alipayFundChangeYes,
+		}, nil
+	}
+
+	provider := &Alipay{client: &alipay.Client{}}
+	req := payment.RefundRequest{OrderID: "sub2_deterministic", Amount: "12.34", Reason: "user request"}
+
+	first, err := provider.Refund(context.Background(), req)
+	if err != nil {
+		t.Fatalf("first refund error: %v", err)
+	}
+	second, err := provider.Refund(context.Background(), req)
+	if err != nil {
+		t.Fatalf("second refund error: %v", err)
+	}
+
+	if len(outRequestNos) != 2 {
+		t.Fatalf("TradeRefund calls = %d, want 2", len(outRequestNos))
+	}
+	if outRequestNos[0] != outRequestNos[1] {
+		t.Fatalf("OutRequestNo not deterministic: %q vs %q", outRequestNos[0], outRequestNos[1])
+	}
+	want := alipayRefundRequestNo(req.OrderID, req.Amount)
+	if outRequestNos[0] != want {
+		t.Fatalf("OutRequestNo = %q, want %q", outRequestNos[0], want)
+	}
+	if first.RefundID != outRequestNos[0] {
+		t.Fatalf("first RefundID = %q, want OutRequestNo %q", first.RefundID, outRequestNos[0])
+	}
+	if second.RefundID != outRequestNos[1] {
+		t.Fatalf("second RefundID = %q, want OutRequestNo %q", second.RefundID, outRequestNos[1])
+	}
+	if first.Status != payment.ProviderStatusSuccess {
+		t.Fatalf("status = %q, want %q", first.Status, payment.ProviderStatusSuccess)
+	}
+}
+
+func TestAlipayRefundRejectsMissingOrderID(t *testing.T) {
+	origRefund := alipayTradeRefund
+	t.Cleanup(func() { alipayTradeRefund = origRefund })
+
+	called := false
+	alipayTradeRefund = func(_ context.Context, _ *alipay.Client, _ alipay.TradeRefund) (*alipay.TradeRefundRsp, error) {
+		called = true
+		return nil, errors.New("should not be called")
+	}
+
+	provider := &Alipay{client: &alipay.Client{}}
+	if _, err := provider.Refund(context.Background(), payment.RefundRequest{OrderID: "  ", Amount: "1.00"}); err == nil {
+		t.Fatal("expected error for missing order id")
+	}
+	if called {
+		t.Fatal("gateway must not be called with an empty OutTradeNo")
+	}
+}
+
+func TestAlipayQueryRefund(t *testing.T) {
+	origQuery := alipayTradeFastPayRefundQuery
+	t.Cleanup(func() { alipayTradeFastPayRefundQuery = origQuery })
+
+	tests := []struct {
+		name    string
+		req     payment.RefundQueryRequest
+		rsp     *alipay.TradeFastPayRefundQueryRsp
+		err     error
+		want    string
+		wantErr bool
+	}{
+		{
+			name: "refund success maps to success",
+			req:  payment.RefundQueryRequest{OrderID: "sub2_q1", RefundID: "sub2_q1-refund-1234"},
+			rsp:  &alipay.TradeFastPayRefundQueryRsp{RefundStatus: alipayRefundStatusSuccess},
+			want: payment.ProviderStatusSuccess,
+		},
+		{
+			name: "missing refund status maps to pending",
+			req:  payment.RefundQueryRequest{OrderID: "sub2_q2", RefundID: "sub2_q2-refund-1234"},
+			rsp:  &alipay.TradeFastPayRefundQueryRsp{},
+			want: payment.ProviderStatusPending,
+		},
+		{
+			name: "unknown refund status maps to pending",
+			req:  payment.RefundQueryRequest{OrderID: "sub2_q3", RefundID: "sub2_q3-refund-1234"},
+			rsp:  &alipay.TradeFastPayRefundQueryRsp{RefundStatus: "REFUND_PROCESSING"},
+			want: payment.ProviderStatusPending,
+		},
+		{
+			name: "trade not exist maps to failed without error",
+			req:  payment.RefundQueryRequest{OrderID: "sub2_q4", RefundID: "sub2_q4-refund-1234"},
+			err:  errors.New("alipay: sub_code=ACQ.TRADE_NOT_EXIST, sub_msg=交易不存在"),
+			want: payment.ProviderStatusFailed,
+		},
+		{
+			name:    "other sdk error is propagated",
+			req:     payment.RefundQueryRequest{OrderID: "sub2_q5", RefundID: "sub2_q5-refund-1234"},
+			err:     errors.New("alipay: sub_code=ACQ.SYSTEM_ERROR"),
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotParam alipay.TradeFastPayRefundQuery
+			alipayTradeFastPayRefundQuery = func(_ context.Context, _ *alipay.Client, param alipay.TradeFastPayRefundQuery) (*alipay.TradeFastPayRefundQueryRsp, error) {
+				gotParam = param
+				return tt.rsp, tt.err
+			}
+
+			provider := &Alipay{client: &alipay.Client{}}
+			resp, err := provider.QueryRefund(context.Background(), tt.req)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error")
+				}
+				if resp != nil {
+					t.Fatalf("response = %+v, want nil", resp)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if gotParam.OutTradeNo != tt.req.OrderID {
+				t.Fatalf("OutTradeNo = %q, want %q", gotParam.OutTradeNo, tt.req.OrderID)
+			}
+			if gotParam.OutRequestNo != tt.req.RefundID {
+				t.Fatalf("OutRequestNo = %q, want %q", gotParam.OutRequestNo, tt.req.RefundID)
+			}
+			if resp == nil {
+				t.Fatal("response is nil")
+			}
+			if resp.Status != tt.want {
+				t.Fatalf("status = %q, want %q", resp.Status, tt.want)
+			}
+			if resp.RefundID != tt.req.RefundID {
+				t.Fatalf("RefundID = %q, want %q", resp.RefundID, tt.req.RefundID)
+			}
+		})
+	}
+}
+
+func TestAlipayQueryRefundFallsBackToDerivedRequestNo(t *testing.T) {
+	origQuery := alipayTradeFastPayRefundQuery
+	t.Cleanup(func() { alipayTradeFastPayRefundQuery = origQuery })
+
+	var gotParam alipay.TradeFastPayRefundQuery
+	alipayTradeFastPayRefundQuery = func(_ context.Context, _ *alipay.Client, param alipay.TradeFastPayRefundQuery) (*alipay.TradeFastPayRefundQueryRsp, error) {
+		gotParam = param
+		return &alipay.TradeFastPayRefundQueryRsp{RefundStatus: alipayRefundStatusSuccess}, nil
+	}
+
+	provider := &Alipay{client: &alipay.Client{}}
+	resp, err := provider.QueryRefund(context.Background(), payment.RefundQueryRequest{
+		OrderID: "sub2_fallback",
+		Amount:  "12.34",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := alipayRefundRequestNo("sub2_fallback", "12.34")
+	if gotParam.OutRequestNo != want {
+		t.Fatalf("OutRequestNo = %q, want %q", gotParam.OutRequestNo, want)
+	}
+	if resp.RefundID != want {
+		t.Fatalf("RefundID = %q, want %q", resp.RefundID, want)
+	}
+	if resp.Status != payment.ProviderStatusSuccess {
+		t.Fatalf("status = %q, want %q", resp.Status, payment.ProviderStatusSuccess)
+	}
+}

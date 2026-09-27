@@ -143,6 +143,10 @@ func (a *Airwallex) MerchantIdentityMetadata() map[string]string {
 	return metadata
 }
 
+// RefundRequiresTradeNo reports that Airwallex refunds are issued against the
+// payment intent id recorded in the order's trade number.
+func (a *Airwallex) RefundRequiresTradeNo() bool { return true }
+
 func (a *Airwallex) currency() string {
 	if a == nil {
 		return payment.DefaultPaymentCurrency
@@ -655,4 +659,5 @@ var (
 	_ payment.Provider                 = (*Airwallex)(nil)
 	_ payment.CancelableProvider       = (*Airwallex)(nil)
 	_ payment.MerchantIdentityProvider = (*Airwallex)(nil)
+	_ payment.TradeNoRefundProvider    = (*Airwallex)(nil)
 )
