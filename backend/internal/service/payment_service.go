@@ -133,6 +133,10 @@ type RefundPlan struct {
 	BalanceToDeduct float64
 	SubDaysToDeduct int
 	SubscriptionID  int64
+	// RefundedBefore is the total already successfully refunded on this order
+	// before this attempt (sum of REFUND_SUCCESS audit entries). It decides
+	// whether the order ends up REFUNDED or PARTIALLY_REFUNDED.
+	RefundedBefore float64
 }
 
 type RefundResult struct {

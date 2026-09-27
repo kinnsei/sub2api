@@ -166,6 +166,15 @@ func TestExecuteRefundUsesActualAvailableBalanceDeduction(t *testing.T) {
 		SetUsername("refund-execute-clamp").
 		Save(ctx)
 	require.NoError(t, err)
+	inst, err := client.PaymentProviderInstance.Create().
+		SetProviderKey(payment.TypeAlipay).
+		SetName("refund-execute-clamp-provider").
+		SetConfig("{}").
+		SetSupportedTypes(payment.TypeAlipay).
+		SetEnabled(true).
+		SetRefundEnabled(true).
+		Save(ctx)
+	require.NoError(t, err)
 	order, err := client.PaymentOrder.Create().
 		SetUserID(user.ID).
 		SetUserEmail(user.Email).
@@ -175,7 +184,7 @@ func TestExecuteRefundUsesActualAvailableBalanceDeduction(t *testing.T) {
 		SetFeeRate(0).
 		SetRechargeCode("REFUND-EXECUTE-CLAMP").
 		SetOutTradeNo("refund_execute_clamp").
-		SetPaymentType(payment.TypeStripe).
+		SetPaymentType(payment.TypeAlipay).
 		SetPaymentTradeNo("").
 		SetOrderType(payment.OrderTypeBalance).
 		SetStatus(OrderStatusCompleted).
@@ -183,6 +192,7 @@ func TestExecuteRefundUsesActualAvailableBalanceDeduction(t *testing.T) {
 		SetPaidAt(time.Now()).
 		SetClientIP("127.0.0.1").
 		SetSrcHost("api.example.com").
+		SetProviderInstanceID(strconv.FormatInt(inst.ID, 10)).
 		Save(ctx)
 	require.NoError(t, err)
 
@@ -196,7 +206,12 @@ func TestExecuteRefundUsesActualAvailableBalanceDeduction(t *testing.T) {
 		Reason: "concurrent spend", Force: true, DeductionType: payment.DeductionTypeBalance, BalanceToDeduct: 100,
 	}
 
-	result, err := (&PaymentService{entClient: client, userRepo: repo}).ExecuteRefund(ctx, plan)
+	prov := &alipayOutTradeNoRefundDouble{refundResponse: &payment.RefundResponse{Status: payment.ProviderStatusSuccess, RefundID: "refund-clamp"}}
+	restoreFactory := replacePaymentProviderFactoryForTest(t, prov)
+	t.Cleanup(restoreFactory)
+
+	svc := &PaymentService{entClient: client, userRepo: repo, loadBalancer: newWebhookProviderTestLoadBalancer(client)}
+	result, err := svc.ExecuteRefund(ctx, plan)
 	require.NoError(t, err)
 	require.True(t, result.Success)
 	require.Equal(t, 25.0, plan.BalanceToDeduct)
@@ -517,11 +532,11 @@ func TestFinalizePendingRefundSuccessRejectsStaleCallerBeforeSecondDeduction(t *
 		}},
 	}
 
-	first, err := svc.finalizePendingRefundSuccess(ctx, svc.refundFinalizePlan(order))
+	first, err := svc.finalizePendingRefundSuccess(ctx, svc.refundFinalizePlan(order, order.RefundAmount, 0))
 	require.NoError(t, err)
 	require.True(t, first.Success)
 
-	second, err := svc.finalizePendingRefundSuccess(ctx, svc.refundFinalizePlan(order))
+	second, err := svc.finalizePendingRefundSuccess(ctx, svc.refundFinalizePlan(order, order.RefundAmount, 0))
 	require.Nil(t, second)
 	require.Error(t, err)
 	require.Equal(t, "CONFLICT", infraerrors.Reason(err))
@@ -553,7 +568,7 @@ func TestFinalizePendingRefundSuccessRollsBackPostDeductionFailure(t *testing.T)
 		}},
 	}
 
-	result, err := svc.finalizePendingRefundSuccess(ctx, svc.refundFinalizePlan(order))
+	result, err := svc.finalizePendingRefundSuccess(ctx, svc.refundFinalizePlan(order, order.RefundAmount, 0))
 	require.Nil(t, result)
 	require.ErrorContains(t, err, "injected failure after deduction")
 
