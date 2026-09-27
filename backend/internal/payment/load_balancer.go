@@ -3,6 +3,7 @@ package payment
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -21,6 +22,16 @@ const (
 	StrategyRoundRobin  Strategy = "round-robin"
 	StrategyLeastAmount Strategy = "least-amount"
 )
+
+// ErrInstanceUsageUnavailable is returned when the daily-usage aggregation for the
+// candidate instances could not be read. The caller must not proceed: without usage
+// data every instance would look empty and could be selected beyond its daily limit.
+var ErrInstanceUsageUnavailable = errors.New("instance daily usage unavailable")
+
+// ErrInstanceLimitsExceeded is returned when no candidate instance satisfies the
+// configured limits. The caller must not proceed with an unlimited/arbitrary
+// instance, since doing so would ignore the operator-configured limits.
+var ErrInstanceLimitsExceeded = errors.New("instance limits exceeded")
 
 // ChannelLimits holds limits for a single payment channel within a provider instance.
 type ChannelLimits struct {
@@ -83,7 +94,9 @@ type instanceCandidate struct {
 //  2. Batch-query daily usage (PENDING + PAID + COMPLETED + RECHARGING) for all candidates
 //  3. Filter out instances where: single-min/max violated OR daily remaining < orderAmount
 //  4. Pick from survivors using the configured strategy (round-robin / least-amount)
-//  5. If all filtered out, fall back to full list (let the provider itself reject)
+//  5. An empty filtered set is an error (ErrInstanceLimitsExceeded), never a fallback
+//  6. If the daily-usage aggregation cannot be read, SelectInstance fails with
+//     ErrInstanceUsageUnavailable instead of treating every instance as unused
 func (lb *DefaultLoadBalancer) SelectInstance(
 	ctx context.Context,
 	providerKey string,
@@ -98,15 +111,16 @@ func (lb *DefaultLoadBalancer) SelectInstance(
 	}
 
 	// Step 2: batch-fetch daily usage for all candidates.
-	candidates := lb.attachDailyUsage(ctx, instances)
+	candidates, err := lb.attachDailyUsage(ctx, instances)
+	if err != nil {
+		return nil, err
+	}
 
 	// Step 3: filter by limits.
 	available := filterByLimits(candidates, paymentType, orderAmount)
 	if len(available) == 0 {
-		slog.Warn("all instances exceeded limits, using full candidate list",
-			"provider", providerKey, "payment_type", paymentType,
-			"order_amount", orderAmount, "count", len(candidates))
-		available = candidates
+		return nil, fmt.Errorf("%w: provider=%s payment_type=%s amount=%v candidates=%d",
+			ErrInstanceLimitsExceeded, providerKey, paymentType, orderAmount, len(candidates))
 	}
 
 	// Step 4: pick by strategy.
@@ -166,10 +180,12 @@ func (lb *DefaultLoadBalancer) queryEnabledInstances(
 
 // attachDailyUsage queries daily usage for each instance in a single pass.
 // Usage includes PENDING orders to avoid over-committing capacity.
+// A query failure returns ErrInstanceUsageUnavailable rather than zero usage:
+// the caller must not treat unreadable usage as unused capacity.
 func (lb *DefaultLoadBalancer) attachDailyUsage(
 	ctx context.Context,
 	instances []*dbent.PaymentProviderInstance,
-) []instanceCandidate {
+) ([]instanceCandidate, error) {
 	todayStart := startOfDay(time.Now())
 
 	// Collect instance IDs.
@@ -197,7 +213,7 @@ func (lb *DefaultLoadBalancer) attachDailyUsage(
 		Aggregate(dbent.Sum(paymentorder.FieldPayAmount)).
 		Scan(ctx, &rows)
 	if err != nil {
-		slog.Warn("batch daily usage query failed, treating all as zero", "error", err)
+		return nil, fmt.Errorf("%w: %v", ErrInstanceUsageUnavailable, err)
 	}
 
 	usageMap := make(map[string]float64, len(rows))
@@ -212,7 +228,7 @@ func (lb *DefaultLoadBalancer) attachDailyUsage(
 			dailyUsed: usageMap[fmt.Sprintf("%d", inst.ID)],
 		}
 	}
-	return candidates
+	return candidates, nil
 }
 
 // filterByLimits removes instances that cannot accommodate the order:

@@ -353,6 +353,13 @@ func (s *PaymentService) selectCreateOrderInstance(ctx context.Context, req Crea
 	}
 	sel, err := s.loadBalancer.SelectInstance(selectCtx, "", req.PaymentType, payment.Strategy(cfg.LoadBalanceStrategy), payAmount)
 	if err != nil {
+		if errors.Is(err, payment.ErrInstanceLimitsExceeded) {
+			slog.Warn("no available payment instance within configured limits",
+				"payment_type", req.PaymentType, "amount", payAmount, "error", err)
+			return nil, infraerrors.TooManyRequests("NO_AVAILABLE_INSTANCE", "no_available_instance")
+		}
+		slog.Warn("payment instance selection failed",
+			"payment_type", req.PaymentType, "amount", payAmount, "error", err)
 		return nil, infraerrors.ServiceUnavailable("PAYMENT_GATEWAY_ERROR", "method_not_configured").
 			WithMetadata(map[string]string{"payment_type": req.PaymentType})
 	}

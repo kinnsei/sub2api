@@ -3,10 +3,16 @@
 package payment
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
+	"entgo.io/ent/dialect"
+	entsql "entgo.io/ent/dialect/sql"
+	"github.com/DATA-DOG/go-sqlmock"
 	dbent "github.com/Wei-Shaw/sub2api/ent"
 )
 
@@ -590,4 +596,114 @@ func int64SliceEqual(a, b []int64) bool {
 		}
 	}
 	return true
+}
+
+// ---------------------------------------------------------------------------
+// SelectInstance (fail-closed behaviour)
+// ---------------------------------------------------------------------------
+
+// newSelectInstanceTestLB builds a DefaultLoadBalancer backed by sqlmock so the
+// instance/usage queries made by SelectInstance can be scripted. The load
+// balancer only needs the ent client; no encryption key is involved because the
+// fixtures store plaintext (empty) configs.
+func newSelectInstanceTestLB(t *testing.T) (*DefaultLoadBalancer, sqlmock.Sqlmock) {
+	t.Helper()
+	sqlDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
+	client := dbent.NewClient(dbent.Driver(entsql.OpenDB(dialect.Postgres, sqlDB)))
+	t.Cleanup(func() { _ = client.Close() })
+	return NewDefaultLoadBalancer(client, nil), mock
+}
+
+// instanceRecordRows returns the sqlmock row set matching all
+// payment_provider_instances columns selected by queryEnabledInstances.
+func instanceRecordRows() *sqlmock.Rows {
+	return sqlmock.NewRows([]string{
+		"id", "provider_key", "name", "config", "supported_types", "enabled",
+		"payment_mode", "sort_order", "limits", "refund_enabled", "allow_user_refund",
+		"created_at", "updated_at",
+	})
+}
+
+func addInstanceRecord(rows *sqlmock.Rows, id int64, providerKey, supportedTypes, limits string) *sqlmock.Rows {
+	now := time.Now()
+	return rows.AddRow(id, providerKey, "test", "", supportedTypes, true, "", 0, limits, false, false, now, now)
+}
+
+func TestSelectInstanceAllCandidatesOverLimit(t *testing.T) {
+	t.Parallel()
+
+	lb, mock := newSelectInstanceTestLB(t)
+	rows := addInstanceRecord(instanceRecordRows(), 1, TypeAlipay, TypeAlipay, makeLimitsJSON(TypeAlipay, ChannelLimits{SingleMax: 10}))
+	mock.ExpectQuery(`FROM "payment_provider_instances"`).WillReturnRows(rows)
+	// Usage query succeeds but returns no usage; the order is still above SingleMax.
+	mock.ExpectQuery(`FROM "payment_orders"`).
+		WillReturnRows(sqlmock.NewRows([]string{"provider_instance_id", "sum"}))
+
+	sel, err := lb.SelectInstance(context.Background(), "", TypeAlipay, StrategyRoundRobin, 100)
+	if err == nil {
+		t.Fatal("SelectInstance returned nil error, want ErrInstanceLimitsExceeded")
+	}
+	if !errors.Is(err, ErrInstanceLimitsExceeded) {
+		t.Fatalf("SelectInstance error = %v, want it to wrap ErrInstanceLimitsExceeded", err)
+	}
+	if sel != nil {
+		t.Fatalf("SelectInstance returned selection %+v, want nil on limits error", sel)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sqlmock expectations: %v", err)
+	}
+}
+
+func TestSelectInstanceUsageQueryFailure(t *testing.T) {
+	t.Parallel()
+
+	lb, mock := newSelectInstanceTestLB(t)
+	rows := addInstanceRecord(instanceRecordRows(), 1, TypeAlipay, TypeAlipay, "")
+	mock.ExpectQuery(`FROM "payment_provider_instances"`).WillReturnRows(rows)
+	mock.ExpectQuery(`FROM "payment_orders"`).WillReturnError(errors.New("db down"))
+
+	sel, err := lb.SelectInstance(context.Background(), "", TypeAlipay, StrategyRoundRobin, 50)
+	if err == nil {
+		t.Fatal("SelectInstance returned nil error, want ErrInstanceUsageUnavailable")
+	}
+	if !errors.Is(err, ErrInstanceUsageUnavailable) {
+		t.Fatalf("SelectInstance error = %v, want it to wrap ErrInstanceUsageUnavailable", err)
+	}
+	if !strings.Contains(err.Error(), "db down") {
+		t.Fatalf("SelectInstance error = %v, want it to keep the underlying error text", err)
+	}
+	if sel != nil {
+		t.Fatalf("SelectInstance returned selection %+v, want nil on usage error", sel)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sqlmock expectations: %v", err)
+	}
+}
+
+func TestSelectInstancePicksCandidateWithinLimits(t *testing.T) {
+	t.Parallel()
+
+	lb, mock := newSelectInstanceTestLB(t)
+	rows := addInstanceRecord(instanceRecordRows(), 7, TypeAlipay, TypeAlipay, makeLimitsJSON(TypeAlipay, ChannelLimits{SingleMin: 1, SingleMax: 100, DailyLimit: 1000}))
+	mock.ExpectQuery(`FROM "payment_provider_instances"`).WillReturnRows(rows)
+	mock.ExpectQuery(`FROM "payment_orders"`).
+		WillReturnRows(sqlmock.NewRows([]string{"provider_instance_id", "sum"}).AddRow("7", 20.0))
+
+	sel, err := lb.SelectInstance(context.Background(), "", TypeAlipay, StrategyRoundRobin, 50)
+	if err != nil {
+		t.Fatalf("SelectInstance returned error: %v", err)
+	}
+	if sel == nil {
+		t.Fatal("SelectInstance returned nil selection, want the in-limit instance")
+	}
+	if sel.InstanceID != "7" {
+		t.Fatalf("SelectInstance selected instance %q, want \"7\"", sel.InstanceID)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sqlmock expectations: %v", err)
+	}
 }

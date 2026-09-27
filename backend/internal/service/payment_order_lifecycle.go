@@ -11,6 +11,7 @@ import (
 	dbent "github.com/Wei-Shaw/sub2api/ent"
 	"github.com/Wei-Shaw/sub2api/ent/paymentauditlog"
 	"github.com/Wei-Shaw/sub2api/ent/paymentorder"
+	"github.com/Wei-Shaw/sub2api/ent/predicate"
 	"github.com/Wei-Shaw/sub2api/internal/payment"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/servertiming"
@@ -26,6 +27,16 @@ const (
 	rateLimitModeFixed         = "fixed"
 	checkPaidResultAlreadyPaid = "already_paid"
 	checkPaidResultCancelled   = "cancelled"
+	// checkPaidResultNotPaid means the upstream state is known to be "not paid"
+	// (or the order has no upstream reference at all), so cancelling is safe.
+	// It is the zero value on purpose: callers that only look for
+	// checkPaidResultAlreadyPaid keep working unchanged.
+	checkPaidResultNotPaid = ""
+	// checkPaidResultUnknown means the upstream state could not be determined
+	// (query failed, or the upstream reported a payment we could not validate).
+	// Callers MUST NOT cancel or expire the order in that case: a transient
+	// provider error must never discard a payment that may have gone through.
+	checkPaidResultUnknown = "unknown"
 
 	pendingPaymentReconcileLimit = 20
 )
@@ -123,8 +134,15 @@ func (s *PaymentService) AdminCancelOrder(ctx context.Context, orderID int64) (s
 
 func (s *PaymentService) cancelCore(ctx context.Context, o *dbent.PaymentOrder, fs, op, ad string) (string, error) {
 	if o.PaymentTradeNo != "" || o.PaymentType != "" {
-		if s.checkPaid(ctx, o) == checkPaidResultAlreadyPaid {
+		switch s.checkPaid(ctx, o) {
+		case checkPaidResultAlreadyPaid:
 			return checkPaidResultAlreadyPaid, nil
+		case checkPaidResultUnknown:
+			// Fail closed: cancelling/expiring on an unverified upstream state
+			// could discard a payment that is already on its way.
+			slog.Warn("skip cancel: upstream payment status could not be verified",
+				"orderID", o.ID, "targetStatus", fs, "provider", psStringValue(o.ProviderKey))
+			return "", infraerrors.ServiceUnavailable("PAYMENT_STATUS_UNVERIFIED", "payment status could not be verified, please retry later")
 		}
 	}
 	c, err := s.entClient.PaymentOrder.Update().Where(paymentorder.IDEQ(o.ID), paymentorder.StatusEQ(OrderStatusPending)).SetStatus(fs).Save(ctx)
@@ -137,8 +155,9 @@ func (s *PaymentService) cancelCore(ctx context.Context, o *dbent.PaymentOrder, 
 			auditAction = "ORDER_EXPIRED"
 		}
 		s.writeAuditLog(ctx, o.ID, auditAction, op, map[string]any{"detail": ad})
+		return checkPaidResultCancelled, nil
 	}
-	return checkPaidResultCancelled, nil
+	return "", nil
 }
 
 func (s *PaymentService) checkPaid(ctx context.Context, o *dbent.PaymentOrder) string {
@@ -152,18 +171,24 @@ func (s *PaymentService) reconcilePaid(ctx context.Context, o *dbent.PaymentOrde
 func (s *PaymentService) checkPaidWithOptions(ctx context.Context, o *dbent.PaymentOrder, opts checkPaidOptions) string {
 	prov, err := s.getOrderProvider(ctx, o)
 	if err != nil {
-		return ""
+		// The order has no usable provider binding (legacy/ambiguous instance):
+		// there is no upstream call to make, so treat it as "not paid" and let
+		// the caller cancel — a late payment is still recovered by toPaid.
+		slog.Warn("checkPaid: order provider unresolved", "orderID", o.ID, "error", err)
+		return checkPaidResultNotPaid
 	}
 	queryRef := paymentOrderQueryReference(o, prov)
 	if queryRef == "" {
-		return ""
+		// No upstream reference was ever handed out for this order, so nothing
+		// can have been paid against it.
+		return checkPaidResultNotPaid
 	}
 	finishProviderCall := servertiming.ObserveDependency(ctx, "payment")
 	resp, err := prov.QueryOrder(ctx, queryRef)
 	finishProviderCall()
 	if err != nil {
 		slog.Warn("query upstream failed", "orderID", o.ID, "error", err)
-		return ""
+		return checkPaidResultUnknown
 	}
 	if resp.Status == payment.ProviderStatusPaid {
 		if !isValidProviderAmount(resp.Amount) {
@@ -176,7 +201,9 @@ func (s *PaymentService) checkPaidWithOptions(ctx context.Context, o *dbent.Paym
 			slog.Warn("query upstream returned invalid paid amount", "orderID", o.ID, "queryRef", queryRef, "paid", resp.Amount)
 			retriedResp, retryOK := requeryPaidOrderOnce(ctx, prov, queryRef)
 			if !retryOK {
-				return ""
+				// The upstream said "paid" but we cannot validate the amount.
+				// Never cancel in this state: the money may well have arrived.
+				return checkPaidResultUnknown
 			}
 			resp = retriedResp
 		}
@@ -199,14 +226,25 @@ func (s *PaymentService) checkPaidWithOptions(ctx context.Context, o *dbent.Paym
 		return checkPaidResultAlreadyPaid
 	}
 	if !opts.cancelIfUnpaid {
-		return ""
+		return checkPaidResultNotPaid
 	}
-	if cp, ok := prov.(payment.CancelableProvider); ok {
-		finishProviderCall := servertiming.ObserveDependency(ctx, "payment")
-		_ = cp.CancelPayment(ctx, queryRef)
-		finishProviderCall()
+	cp, ok := prov.(payment.CancelableProvider)
+	if !ok {
+		// The provider has no upstream close API (e.g. EasyPay); the local cancel
+		// still happens and a late payment is recovered by toPaid.
+		slog.Info("provider does not support upstream payment close, cancelling locally only",
+			"orderID", o.ID, "provider", prov.ProviderKey())
+		return checkPaidResultNotPaid
 	}
-	return ""
+	finishCancelCall := servertiming.ObserveDependency(ctx, "payment")
+	if err := cp.CancelPayment(ctx, queryRef); err != nil {
+		// Best effort: the local cancel still happens (a late payment is
+		// recovered by toPaid), but ops should know the upstream trade may
+		// still be payable.
+		slog.Warn("close upstream payment failed", "orderID", o.ID, "provider", prov.ProviderKey(), "error", err)
+	}
+	finishCancelCall()
+	return checkPaidResultNotPaid
 }
 
 func requeryPaidOrderOnce(ctx context.Context, prov payment.Provider, queryRef string) (*payment.QueryOrderResponse, bool) {
@@ -303,8 +341,10 @@ func (s *PaymentService) VerifyOrderByOutTradeNo(ctx context.Context, outTradeNo
 	return o, nil
 }
 
-// ReconcilePendingPaymentOrders actively checks recent pending Alipay and WeChat
-// orders so missed provider notifications do not wait until order expiry to fulfill.
+// ReconcilePendingPaymentOrders actively checks recent pending Alipay, WeChat and
+// EasyPay orders so missed provider notifications do not wait until order expiry
+// to fulfill. EasyPay is included because its popup flow can complete without a
+// callback reaching us.
 func (s *PaymentService) ReconcilePendingPaymentOrders(ctx context.Context) (int, error) {
 	now := time.Now()
 	orders, err := s.entClient.PaymentOrder.Query().
@@ -312,14 +352,7 @@ func (s *PaymentService) ReconcilePendingPaymentOrders(ctx context.Context) (int
 			paymentorder.StatusEQ(OrderStatusPending),
 			paymentorder.ExpiresAtGT(now),
 			paymentorder.Or(
-				paymentorder.PaymentTypeEQ(payment.TypeWxpay),
-				paymentorder.PaymentTypeHasPrefix(payment.TypeWxpay+"_"),
-				paymentorder.ProviderKeyEQ(payment.TypeWxpay),
-				paymentorder.ProviderKeyHasPrefix(payment.TypeWxpay+"_"),
-				paymentorder.PaymentTypeEQ(payment.TypeAlipay),
-				paymentorder.PaymentTypeHasPrefix(payment.TypeAlipay+"_"),
-				paymentorder.ProviderKeyEQ(payment.TypeAlipay),
-				paymentorder.ProviderKeyHasPrefix(payment.TypeAlipay+"_"),
+				reconcilablePaymentChannelPredicates()...,
 			),
 		).
 		Order(dbent.Asc(paymentorder.FieldCreatedAt)).
@@ -336,6 +369,23 @@ func (s *PaymentService) ReconcilePendingPaymentOrders(ctx context.Context) (int
 		}
 	}
 	return recovered, nil
+}
+
+// reconcilablePaymentChannelPredicates lists the payment types / provider keys
+// whose pending orders are actively re-queried upstream. Orders routed through a
+// provider are matched on provider_key as well, because the stored payment_type
+// keeps the user-facing method (e.g. EasyPay orders are stored as alipay/wxpay).
+func reconcilablePaymentChannelPredicates() []predicate.PaymentOrder {
+	var predicates []predicate.PaymentOrder
+	for _, key := range []string{payment.TypeWxpay, payment.TypeAlipay, payment.TypeEasyPay} {
+		predicates = append(predicates,
+			paymentorder.PaymentTypeEQ(key),
+			paymentorder.PaymentTypeHasPrefix(key+"_"),
+			paymentorder.ProviderKeyEQ(key),
+			paymentorder.ProviderKeyHasPrefix(key+"_"),
+		)
+	}
+	return predicates
 }
 
 // VerifyOrderPublic returns the currently persisted public order state without
@@ -385,8 +435,14 @@ func (s *PaymentService) ExpireTimedOutOrders(ctx context.Context) (int, error) 
 	n := 0
 	for _, o := range orders {
 		// Check upstream payment status before expiring — the user may have
-		// paid just before timeout and the webhook hasn't arrived yet.
-		outcome, _ := s.cancelCore(ctx, o, OrderStatusExpired, "system", "order expired")
+		// paid just before timeout and the webhook hasn't arrived yet. When the
+		// upstream state cannot be verified, keep the order pending and retry on
+		// the next sweep instead of expiring a possibly-paid order.
+		outcome, err := s.cancelCore(ctx, o, OrderStatusExpired, "system", "order expired")
+		if err != nil {
+			slog.Warn("skip expiring order: upstream payment status unverified", "orderID", o.ID, "error", err)
+			continue
+		}
 		if outcome == checkPaidResultAlreadyPaid {
 			slog.Info("order was paid during expiry", "orderID", o.ID)
 			continue

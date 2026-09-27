@@ -150,23 +150,24 @@ func expectedNotificationProviderKey(registry *payment.Registry, orderPaymentTyp
 func (s *PaymentService) toPaid(ctx context.Context, o *dbent.PaymentOrder, tradeNo string, paid float64, pk string) error {
 	previousStatus := o.Status
 	now := time.Now()
-	grace := now.Add(-paymentGraceMinutes * time.Minute)
+	// A provider-confirmed payment is always fulfilled, even when it lands after
+	// the order was cancelled or expired: the money was actually collected, so
+	// dropping it would silently lose the user's funds. Late arrivals beyond the
+	// grace window are flagged in the audit log for ops review.
+	lateAfterGrace := previousStatus == OrderStatusExpired && now.Sub(o.UpdatedAt) > paymentGraceMinutes*time.Minute
 	c, err := s.entClient.PaymentOrder.Update().Where(
 		paymentorder.IDEQ(o.ID),
 		paymentorder.Or(
 			paymentorder.StatusEQ(OrderStatusPending),
 			paymentorder.StatusEQ(OrderStatusCancelled),
-			paymentorder.And(
-				paymentorder.StatusEQ(OrderStatusExpired),
-				paymentorder.UpdatedAtGTE(grace),
-			),
+			paymentorder.StatusEQ(OrderStatusExpired),
 		),
 	).SetStatus(OrderStatusPaid).SetPayAmount(paid).SetPaymentTradeNo(tradeNo).SetPaidAt(now).ClearFailedAt().ClearFailedReason().Save(ctx)
 	if err != nil {
 		return fmt.Errorf("update to PAID: %w", err)
 	}
 	if c == 0 {
-		return s.alreadyProcessed(ctx, o)
+		return s.alreadyProcessed(ctx, o, tradeNo, paid, pk)
 	}
 	if previousStatus == OrderStatusCancelled || previousStatus == OrderStatusExpired {
 		slog.Info("order recovered from webhook payment success",
@@ -175,18 +176,23 @@ func (s *PaymentService) toPaid(ctx context.Context, o *dbent.PaymentOrder, trad
 			"tradeNo", tradeNo,
 			"provider", pk,
 		)
+		reason := "webhook payment success received after order " + previousStatus
+		if lateAfterGrace {
+			reason = "webhook payment success received long after order " + previousStatus + " (beyond grace period)"
+			slog.Warn("order recovered long after expiry", "orderID", o.ID, "previousStatus", previousStatus, "updatedAt", o.UpdatedAt)
+		}
 		s.writeAuditLog(ctx, o.ID, "ORDER_RECOVERED", pk, map[string]any{
 			"previous_status": previousStatus,
 			"tradeNo":         tradeNo,
 			"paidAmount":      paid,
-			"reason":          "webhook payment success received after order " + previousStatus,
+			"reason":          reason,
 		})
 	}
 	s.writeAuditLog(ctx, o.ID, "ORDER_PAID", pk, map[string]any{"tradeNo": tradeNo, "paidAmount": paid})
 	return s.executeFulfillment(ctx, o.ID)
 }
 
-func (s *PaymentService) alreadyProcessed(ctx context.Context, o *dbent.PaymentOrder) error {
+func (s *PaymentService) alreadyProcessed(ctx context.Context, o *dbent.PaymentOrder, tradeNo string, paid float64, pk string) error {
 	cur, err := s.entClient.PaymentOrder.Get(ctx, o.ID)
 	if err != nil {
 		return nil
@@ -196,18 +202,35 @@ func (s *PaymentService) alreadyProcessed(ctx context.Context, o *dbent.PaymentO
 		return nil
 	case OrderStatusFailed, OrderStatusPaid, OrderStatusRecharging:
 		return s.executeFulfillment(ctx, o.ID)
-	case OrderStatusExpired:
-		slog.Warn("webhook payment success for expired order beyond grace period",
+	case OrderStatusCancelled, OrderStatusExpired:
+		// Defensive race path: the guarded update lost against a concurrent
+		// cancel/expire. The payment is real, so re-apply the transition once
+		// (bounded: a second miss gives up and records an audit entry).
+		slog.Warn("paid notification lost the status race, re-applying transition",
 			"orderID", o.ID,
 			"status", cur.Status,
 			"updatedAt", cur.UpdatedAt,
 		)
-		s.writeAuditLog(ctx, o.ID, "PAYMENT_AFTER_EXPIRY", "system", map[string]any{
-			"status":    cur.Status,
-			"updatedAt": cur.UpdatedAt,
-			"reason":    "payment arrived after expiry grace period",
+		updated, updateErr := s.entClient.PaymentOrder.Update().Where(
+			paymentorder.IDEQ(o.ID),
+			paymentorder.StatusIn(OrderStatusCancelled, OrderStatusExpired),
+		).SetStatus(OrderStatusPaid).SetPayAmount(paid).SetPaymentTradeNo(tradeNo).SetPaidAt(time.Now()).ClearFailedAt().ClearFailedReason().Save(ctx)
+		if updateErr != nil || updated == 0 {
+			slog.Error("failed to re-apply paid transition after status race", "orderID", o.ID, "error", updateErr)
+			s.writeAuditLog(ctx, o.ID, "PAYMENT_STATUS_RACE", "system", map[string]any{
+				"status":  cur.Status,
+				"tradeNo": tradeNo,
+				"reason":  "paid notification could not be re-applied after a status race",
+			})
+			return nil
+		}
+		s.writeAuditLog(ctx, o.ID, "ORDER_RECOVERED", pk, map[string]any{
+			"previous_status": cur.Status,
+			"tradeNo":         tradeNo,
+			"paidAmount":      paid,
+			"reason":          "paid notification re-applied after a status race",
 		})
-		return nil
+		return s.executeFulfillment(ctx, o.ID)
 	default:
 		return nil
 	}
@@ -884,4 +907,69 @@ func (s *PaymentService) RetryFulfillment(ctx context.Context, oid int64) error 
 	}
 	s.writeAuditLog(ctx, oid, "RECHARGE_RETRY", "admin", map[string]any{"detail": "admin manual retry"})
 	return s.executeFulfillment(ctx, oid)
+}
+
+// Auto-retry bounds for stuck fulfillment.
+const (
+	// paymentFulfillmentAutoRetryLimit caps how many stuck orders one sweep drives.
+	paymentFulfillmentAutoRetryLimit = 20
+	// paymentFulfillmentMaxAutoAttempts is the recorded-failure budget per order.
+	// Once exhausted the order stays FAILED for manual admin review instead of
+	// being retried forever.
+	paymentFulfillmentMaxAutoAttempts = 5
+)
+
+// RetryStuckFulfillments re-drives fulfillment for paid orders that never
+// completed: PAID (the webhook was processed but fulfillment never ran),
+// FAILED (fulfillment error) and RECHARGING (the lease owner died mid-run).
+// It is called from the leader-elected periodic sweep, so only one instance
+// issues these updates per cycle, and the fulfillment lease keeps a concurrent
+// webhook/admin retry from double-processing the same order.
+func (s *PaymentService) RetryStuckFulfillments(ctx context.Context) (int, error) {
+	staleBefore := time.Now().Add(-paymentFulfillmentLeaseDuration)
+	orders, err := s.entClient.PaymentOrder.Query().
+		Where(
+			paymentorder.StatusIn(OrderStatusPaid, OrderStatusFailed, OrderStatusRecharging),
+			paymentorder.PaidAtNotNil(),
+			paymentorder.UpdatedAtLTE(staleBefore),
+		).
+		Order(dbent.Asc(paymentorder.FieldUpdatedAt)).
+		Limit(paymentFulfillmentAutoRetryLimit).
+		All(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("query stuck fulfillment orders: %w", err)
+	}
+
+	retried := 0
+	for _, o := range orders {
+		if s.fulfillmentFailureCount(ctx, o.ID) >= paymentFulfillmentMaxAutoAttempts {
+			continue
+		}
+		s.writeAuditLog(ctx, o.ID, "FULFILLMENT_AUTO_RETRY", "system", map[string]any{
+			"previousStatus": o.Status,
+			"failedReason":   psStringValue(o.FailedReason),
+		})
+		if err := s.executeFulfillment(ctx, o.ID); err != nil {
+			slog.Warn("[PaymentOrderMaintenance] auto fulfillment retry failed", "orderID", o.ID, "error", err)
+			continue
+		}
+		retried++
+	}
+	return retried, nil
+}
+
+// fulfillmentFailureCount counts recorded fulfillment failures for an order.
+// It bounds automatic retries without adding a schema column; a counting error
+// reports 0 so a transient audit-log failure cannot block recovery.
+func (s *PaymentService) fulfillmentFailureCount(ctx context.Context, oid int64) int {
+	count, err := s.entClient.PaymentAuditLog.Query().
+		Where(
+			paymentauditlog.OrderIDEQ(strconv.FormatInt(oid, 10)),
+			paymentauditlog.ActionEQ("FULFILLMENT_FAILED"),
+		).Count(ctx)
+	if err != nil {
+		slog.Warn("count fulfillment failures failed", "orderID", oid, "error", err)
+		return 0
+	}
+	return count
 }
