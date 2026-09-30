@@ -54,6 +54,9 @@ type systemUpdateService interface {
 	Rollback() error
 	ListRollbackVersions(ctx context.Context) ([]service.RollbackVersion, error)
 	RollbackToVersion(ctx context.Context, version string) error
+	// Repository reports the configured "owner/repo" release source ("" when
+	// unconfigured) so the API can tell the UI where this build came from.
+	Repository() string
 }
 
 // NewSystemHandler creates a new SystemHandler
@@ -144,6 +147,9 @@ func (h *SystemHandler) GetRollbackVersions(c *gin.Context) {
 	}
 	response.Success(c, gin.H{
 		"versions": versions,
+		// Expose the configured release source so the UI can build accurate
+		// install/rollback commands instead of hardcoding a repository.
+		"repository": h.updateSvc.Repository(),
 	})
 }
 

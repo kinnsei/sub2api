@@ -186,6 +186,11 @@ type UpdateConfig struct {
 	// 支持 http/https/socks5/socks5h 协议
 	// 例如: "http://127.0.0.1:7890", "socks5://127.0.0.1:1080"
 	ProxyURL string `mapstructure:"proxy_url"`
+	// Repository 是本部署的发布仓库，格式为 "owner/repo"。
+	// 检查更新、下载升级包和按版本安装登录运行时都从这里取发布物。
+	// 留空表示未配置：相关功能会明确报告"未配置"，而不会去访问某个
+	// 与本部署无关的仓库。
+	Repository string `mapstructure:"repository"`
 }
 
 type IdempotencyConfig struct {
@@ -2639,6 +2644,9 @@ func setEnvReachableDefaults() {
 	viper.SetDefault("gateway.session_idle_timeout_minutes", 0)
 	viper.SetDefault("gateway.user_message_queue.mode", "")
 	viper.SetDefault("update.proxy_url", "")
+	// 发布仓库没有通用的默认值：默认到任何具体仓库都会让升级与登录运行时
+	// 去下载与本部署无关的产物。部署方必须显式配置。
+	viper.SetDefault("update.repository", "")
 
 	// sticky_escape_enabled is the one exception to the zero-value rule: its
 	// effective default is true, applied post-unmarshal via a viper.IsSet guard.

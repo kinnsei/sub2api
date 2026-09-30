@@ -37,8 +37,10 @@ func (s *OpenAIOAuthReauthService) configureWorker(cfg *config.Config, info Buil
 	}
 	host := "127.0.0.1"
 	port := 8080
+	repository := ""
 	if cfg != nil {
 		port = cfg.Server.Port
+		repository = cfg.Update.Repository
 		switch cfg.Server.Host {
 		case "", "0.0.0.0":
 		case "::":
@@ -47,7 +49,7 @@ func (s *OpenAIOAuthReauthService) configureWorker(cfg *config.Config, info Buil
 			host = cfg.Server.Host
 		}
 	}
-	s.worker = reauthruntime.New(filepath.Join(dir, "credential-worker"), info.Version, "http://"+net.JoinHostPort(host, strconv.Itoa(port)), s.workerToken)
+	s.worker = reauthruntime.New(filepath.Join(dir, "credential-worker"), info.Version, "http://"+net.JoinHostPort(host, strconv.Itoa(port)), s.workerToken, repository)
 }
 
 // WorkerAuthentication verifies the private protocol without exposing the key.

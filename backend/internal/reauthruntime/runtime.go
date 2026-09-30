@@ -24,6 +24,13 @@ import (
 const maxArchive = 256 << 20
 const maxExtracted = 768 << 20
 
+// validRepo reports whether repo is a well-formed "owner/repo" value. It guards
+// the release URL construction so an unconfigured or malformed value can never
+// be interpolated into a GitHub API path.
+func validRepo(repo string) bool {
+	return regexp.MustCompile(`^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$`).MatchString(repo)
+}
+
 type Status struct {
 	StartedAt int64  `json:"-"`
 	Mode      string `json:"mode"`
@@ -41,13 +48,21 @@ type Manager struct {
 	started                       bool
 	retryAt                       time.Time
 	client                        *http.Client
+	// repository is the "owner/repo" that publishes the release-matched
+	// runtime. Empty means the operator has not configured a release source.
+	repository string
 }
 
-func New(root, version, baseURL, token string) *Manager {
+// New creates a Manager. repository is the "owner/repo" release source for the
+// runtime artifact and must be configured by the operator; an empty value makes
+// the manager report release_repo_not_configured instead of downloading from an
+// unrelated repository.
+func New(root, version, baseURL, token, repository string) *Manager {
 	root, _ = filepath.Abs(root)
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Manager{root: root, version: strings.TrimPrefix(version, "v"), baseURL: baseURL, token: token,
-		ctx: ctx, cancel: cancel, client: &http.Client{Timeout: 5 * time.Minute},
+		repository: strings.Trim(strings.TrimSuffix(strings.TrimSpace(repository), ".git"), "/"),
+		ctx:        ctx, cancel: cancel, client: &http.Client{Timeout: 5 * time.Minute},
 		status: Status{Mode: "managed", State: "idle"}}
 }
 
@@ -78,6 +93,11 @@ func (m *Manager) Ensure() {
 	if !regexp.MustCompile(`^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$`).MatchString(m.version) {
 		m.status.State = "unavailable"
 		m.status.Reason = "release_required"
+		return
+	}
+	if !validRepo(m.repository) {
+		m.status.State = "unavailable"
+		m.status.Reason = "release_repo_not_configured"
 		return
 	}
 	m.started = true
@@ -150,10 +170,13 @@ func (m *Manager) prepare(ctx context.Context) (string, error) {
 	if err := os.MkdirAll(m.root, 0700); err != nil {
 		return "", err
 	}
-	// A release digest from the owner repository is required; never execute an
-	// unverified download or follow an arbitrary manifest download URL.
+	// A release digest from the configured repository is required; never
+	// execute an unverified download or follow an arbitrary manifest download URL.
+	if !validRepo(m.repository) {
+		return "", errors.New("release repository is not configured")
+	}
 	name := "sub2api-reauth_" + m.version + "_linux_" + runtime.GOARCH + ".tar.gz"
-	url := "https://api.github.com/repos/ranxi2001/sub2api/releases/tags/v" + m.version
+	url := "https://api.github.com/repos/" + m.repository + "/releases/tags/v" + m.version
 	body, err := m.get(ctx, url, 4<<20)
 	if err != nil {
 		return "", err
@@ -179,7 +202,7 @@ func (m *Manager) prepare(ctx context.Context) (string, error) {
 	if _, err := hex.DecodeString(digest); err != nil {
 		return "", errors.New("invalid runtime digest")
 	}
-	archive, err := m.get(ctx, "https://github.com/ranxi2001/sub2api/releases/download/v"+m.version+"/"+name, maxArchive)
+	archive, err := m.get(ctx, "https://github.com/"+m.repository+"/releases/download/v"+m.version+"/"+name, maxArchive)
 	if err != nil {
 		return "", err
 	}

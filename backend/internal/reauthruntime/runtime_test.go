@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -79,7 +80,7 @@ func TestPrepareVerifiesDigestBeforeExecutingAndReusesCache(t *testing.T) {
 				digest = strings.Repeat("0", 64)
 			}
 			requests := 0
-			m := New(root, "1.2.3", "http://127.0.0.1:4040", strings.Repeat("x", 64))
+			m := New(root, "1.2.3", "http://127.0.0.1:4040", strings.Repeat("x", 64), "example-owner/example-repo")
 			m.client = &http.Client{Transport: transportFunc(func(req *http.Request) (*http.Response, error) {
 				requests++
 				require.NotContains(t, req.URL.String(), m.token)
@@ -104,7 +105,7 @@ func TestPrepareVerifiesDigestBeforeExecutingAndReusesCache(t *testing.T) {
 }
 
 func TestStopCancelsPreparationAndCannotRestart(t *testing.T) {
-	m := New(t.TempDir(), "1.2.3", "http://127.0.0.1:4040", strings.Repeat("x", 64))
+	m := New(t.TempDir(), "1.2.3", "http://127.0.0.1:4040", strings.Repeat("x", 64), "example-owner/example-repo")
 	entered := make(chan struct{})
 	m.client = &http.Client{Transport: transportFunc(func(req *http.Request) (*http.Response, error) {
 		close(entered)
@@ -135,7 +136,7 @@ func TestManagedProcessGetsOnlyWorkerEnvironmentAndStops(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "python"), []byte(script), 0700))
 	t.Setenv("OPENAI_REAUTH_CONCURRENCY", "4")
 	t.Setenv("DATABASE_PASSWORD", "must-not-inherit")
-	m := New(root, "1.2.3", "http://127.0.0.1:4040", "synthetic-worker-token")
+	m := New(root, "1.2.3", "http://127.0.0.1:4040", "synthetic-worker-token", "example-owner/example-repo")
 	m.Ensure()
 	defer m.Stop()
 	require.Eventually(t, func() bool { _, err := os.Stat(filepath.Join(dir, "unrelated-secret")); return err == nil }, time.Second, 10*time.Millisecond)
@@ -151,4 +152,45 @@ func TestManagedProcessGetsOnlyWorkerEnvironmentAndStops(t *testing.T) {
 	require.Equal(t, "4", string(got))
 	m.Stop()
 	require.Equal(t, "stopped", m.Status().State)
+}
+
+// An unconfigured release repository must never be interpolated into a GitHub
+// URL; preparation fails before any network access.
+func TestPrepareWithoutRepositoryFailsClosed(t *testing.T) {
+	m := New(t.TempDir(), "1.2.3", "http://127.0.0.1:4040", strings.Repeat("x", 64), "")
+	requests := 0
+	m.client = &http.Client{Transport: transportFunc(func(*http.Request) (*http.Response, error) {
+		requests++
+		return nil, errors.New("network must not be reached")
+	})}
+
+	_, err := m.prepare(context.Background())
+
+	require.ErrorContains(t, err, "release repository is not configured")
+	require.Zero(t, requests)
+	require.False(t, validRepo(m.repository))
+}
+
+// Ensure reports the missing configuration on platforms where the managed
+// runtime is supported at all; elsewhere the platform check wins first.
+func TestEnsureWithoutRepositoryReportsConfiguration(t *testing.T) {
+	m := New(t.TempDir(), "1.2.3", "http://127.0.0.1:4040", strings.Repeat("x", 64), "")
+
+	m.Ensure()
+
+	require.Equal(t, "unavailable", m.Status().State)
+	expected := "release_repo_not_configured"
+	if runtime.GOOS != "linux" || (runtime.GOARCH != "amd64" && runtime.GOARCH != "arm64") {
+		expected = "unsupported_platform"
+	}
+	require.Equal(t, expected, m.Status().Reason)
+}
+
+func TestValidRepoRejectsMalformedValues(t *testing.T) {
+	for _, valid := range []string{"owner/repo", "a-b/c.d", "A1/B2"} {
+		require.True(t, validRepo(valid), "expected valid: %q", valid)
+	}
+	for _, invalid := range []string{"", "owner", "owner/repo/extra", "../../etc/passwd", "owner/re po", "owner/repo?x=1"} {
+		require.False(t, validRepo(invalid), "expected invalid: %q", invalid)
+	}
 }

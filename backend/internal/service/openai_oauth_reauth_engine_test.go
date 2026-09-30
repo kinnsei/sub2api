@@ -127,7 +127,7 @@ func TestOpenAIOAuthReauthEngineManagedClaimRetainsPasswordScope(t *testing.T) {
 	require.NoError(t, err)
 	_, err = svc.CreateTask(ctx, 42)
 	require.NoError(t, err)
-	svc.worker = reauthruntime.New(t.TempDir(), "1.0.0", "http://127.0.0.1:8080", "test")
+	svc.worker = reauthruntime.New(t.TempDir(), "1.0.0", "http://127.0.0.1:8080", "test", "example-owner/example-repo")
 	claim, err := svc.ClaimTaskWithEngines(ctx, "managed", []string{OpenAIOAuthReauthEngineLocal, OpenAIOAuthReauthEngineSessionStudio})
 	require.NoError(t, err)
 	require.Nil(t, claim)

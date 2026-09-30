@@ -3,6 +3,7 @@
 package config
 
 import (
+	"os"
 	"reflect"
 	"sort"
 	"strings"
@@ -100,5 +101,30 @@ func TestConfigKeysAreEnvReachable(t *testing.T) {
 	if len(unreachable) > 0 {
 		t.Fatalf("%d config keys have no default registered, so their environment variables are silently ignored:\n  %s",
 			len(unreachable), strings.Join(unreachable, "\n  "))
+	}
+}
+
+// TestUpdateRepositoryFromEnvOnly guards the operator-facing contract for the
+// release repository: a deployment that sets only UPDATE_REPOSITORY (no
+// config.yaml) must still get the value, because the admin "check for update"
+// feature and the version-matched login runtime download both refuse to run
+// without it. The generic reachability test above covers the key's presence;
+// this one proves the env var actually arrives at the typed field through
+// viper's AutomaticEnv + key-replacer path.
+func TestUpdateRepositoryFromEnvOnly(t *testing.T) {
+	t.Setenv("UPDATE_REPOSITORY", "example-owner/example-repo")
+	// Minimal required values so Load's validation passes; the point here is
+	// viper decoding, not validation.
+	t.Setenv("JWT_SECRET", "test-secret-at-least-32-characters-long")
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+	os.Args = []string{"sub2api"}
+
+	cfg, err := Load()
+	if err != nil {
+		t.Skipf("Load requires additional configuration in this environment: %v", err)
+	}
+	if cfg.Update.Repository != "example-owner/example-repo" {
+		t.Fatalf("UPDATE_REPOSITORY did not reach cfg.Update.Repository (got %q)", cfg.Update.Repository)
 	}
 }

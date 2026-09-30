@@ -63,6 +63,7 @@ func TestUpdateServicePerformUpdateNoUpdateReturnsSentinel(t *testing.T) {
 		githubClient,
 		"0.1.132",
 		"release",
+		"example-owner/example-repo",
 	)
 
 	err := svc.PerformUpdate(context.Background())
@@ -70,7 +71,7 @@ func TestUpdateServicePerformUpdateNoUpdateReturnsSentinel(t *testing.T) {
 	require.Error(t, err)
 	require.True(t, errors.Is(err, ErrNoUpdateAvailable))
 	require.ErrorIs(t, err, ErrNoUpdateAvailable)
-	require.Equal(t, "ranxi2001/sub2api", githubClient.latestRepo)
+	require.Equal(t, "example-owner/example-repo", githubClient.latestRepo)
 }
 
 func newRollbackTestService(current string, releases []*GitHubRelease) *UpdateService {
@@ -79,6 +80,7 @@ func newRollbackTestService(current string, releases []*GitHubRelease) *UpdateSe
 		&updateServiceGitHubClientStub{recentReleases: releases},
 		current,
 		"release",
+		"example-owner/example-repo",
 	)
 }
 
@@ -141,6 +143,7 @@ func TestUpdateServiceListRollbackVersionsPropagatesFetchError(t *testing.T) {
 		&updateServiceGitHubClientStub{recentErr: errors.New("github unavailable")},
 		"0.1.147",
 		"release",
+		"example-owner/example-repo",
 	)
 
 	_, err := svc.ListRollbackVersions(context.Background())
@@ -188,4 +191,54 @@ func TestUpdateServiceRollbackToVersionAcceptsVPrefix(t *testing.T) {
 	require.Error(t, err)
 	require.NotErrorIs(t, err, ErrRollbackVersionNotAllowed)
 	require.Contains(t, err.Error(), "no compatible release found")
+}
+
+// An unconfigured release repository must fail loudly instead of silently
+// querying some other project's releases.
+func TestUpdateServiceUnconfiguredRepositoryFails(t *testing.T) {
+	githubClient := &updateServiceGitHubClientStub{release: &GitHubRelease{TagName: "v9.9.9"}}
+	svc := NewUpdateService(&updateServiceCacheStub{}, githubClient, "0.1.0", "release", "")
+
+	info, err := svc.CheckUpdate(context.Background(), true)
+
+	// CheckUpdate degrades to a warning rather than a hard error...
+	require.NoError(t, err)
+	require.NotNil(t, info)
+	require.Contains(t, info.Warning, ErrReleaseRepoNotConfigured.Error())
+	require.False(t, info.HasUpdate)
+	// ...and critically, the client was never asked to hit any repository.
+	require.Empty(t, githubClient.latestRepo)
+}
+
+func TestUpdateServiceRollbackUnconfiguredRepositoryFails(t *testing.T) {
+	svc := NewUpdateService(
+		&updateServiceCacheStub{},
+		&updateServiceGitHubClientStub{},
+		"0.1.0",
+		"release",
+		"",
+	)
+
+	_, err := svc.ListRollbackVersions(context.Background())
+
+	require.ErrorIs(t, err, ErrReleaseRepoNotConfigured)
+}
+
+func TestUpdateServiceNormalizesRepository(t *testing.T) {
+	cases := map[string]string{
+		"owner/repo":             "owner/repo",
+		"  owner/repo  ":         "owner/repo",
+		"owner/repo.git":         "owner/repo",
+		"/owner/repo/":           "owner/repo",
+		"https://github.com/a/b": "",
+		"owner":                  "",
+		"owner/repo/extra":       "",
+		"":                       "",
+		"owner/re po":            "",
+		"../../etc/passwd":       "",
+		"owner/repo?x=1":         "",
+	}
+	for input, want := range cases {
+		require.Equal(t, want, normalizeRepo(input), "input=%q", input)
+	}
 }

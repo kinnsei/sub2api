@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
@@ -30,10 +31,6 @@ var (
 const (
 	updateCacheKey = "update_check_cache"
 	updateCacheTTL = 1200 // 20 minutes
-	// Releases are maintained on the owner-controlled production fork. Keep the
-	// updater independent from the upstream repository so production installs
-	// see our release stream and can update to our fork's assets.
-	githubRepo = "ranxi2001/sub2api"
 
 	// Security: allowed download domains for updates
 	allowedDownloadHost = "github.com"
@@ -68,17 +65,51 @@ type UpdateService struct {
 	githubClient   GitHubReleaseClient
 	currentVersion string
 	buildType      string // "source" for manual builds, "release" for CI builds
+	// repository is the "owner/repo" release source for this deployment.
+	// Empty means the operator has not configured one.
+	repository string
 }
 
-// NewUpdateService creates a new UpdateService
-func NewUpdateService(cache UpdateCache, githubClient GitHubReleaseClient, version, buildType string) *UpdateService {
+// NewUpdateService creates a new UpdateService.
+// repository is the "owner/repo" release source configured by the operator;
+// it may be empty, in which case update checks report a configuration error
+// instead of querying an unrelated repository.
+func NewUpdateService(cache UpdateCache, githubClient GitHubReleaseClient, version, buildType, repository string) *UpdateService {
 	return &UpdateService{
 		cache:          cache,
 		githubClient:   githubClient,
 		currentVersion: version,
 		buildType:      buildType,
+		repository:     normalizeRepo(repository),
 	}
 }
+
+// normalizeRepo canonicalizes an "owner/repo" value and rejects anything that
+// could escape the expected api.github.com repository path.
+func normalizeRepo(repo string) string {
+	repo = strings.TrimSpace(repo)
+	repo = strings.TrimSuffix(repo, ".git")
+	repo = strings.Trim(repo, "/")
+	if repo == "" {
+		return ""
+	}
+	parts := strings.Split(repo, "/")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return ""
+	}
+	for _, part := range parts {
+		if !regexp.MustCompile(`^[A-Za-z0-9._-]+$`).MatchString(part) {
+			return ""
+		}
+	}
+	return parts[0] + "/" + parts[1]
+}
+
+// ErrReleaseRepoNotConfigured 表示部署方尚未配置发布仓库。
+var ErrReleaseRepoNotConfigured = infraerrors.ServiceUnavailable(
+	"RELEASE_REPO_NOT_CONFIGURED",
+	"release repository is not configured; set update.repository to the \"owner/repo\" that publishes this deployment",
+)
 
 // UpdateInfo contains update information
 type UpdateInfo struct {
@@ -363,10 +394,35 @@ func (s *UpdateService) RollbackToVersion(ctx context.Context, version string) e
 	return s.applyReleaseAssets(ctx, assets)
 }
 
+// Repository returns the configured "owner/repo" release source, or an empty
+// string when the operator has not configured one. Exposed so callers (e.g. the
+// admin UI) can render accurate install/rollback commands instead of assuming
+// some built-in repository.
+func (s *UpdateService) Repository() string {
+	if s == nil {
+		return ""
+	}
+	return s.repository
+}
+
+// releaseRepo returns the configured release repository or an error when the
+// operator has not configured one. Never falls back to a built-in repository:
+// downloading releases from an unrelated project would be both wrong and unsafe.
+func (s *UpdateService) releaseRepo() (string, error) {
+	if s == nil || s.repository == "" {
+		return "", ErrReleaseRepoNotConfigured
+	}
+	return s.repository, nil
+}
+
 // fetchRollbackCandidates fetches recent releases and keeps the newest
 // maxRollbackVersions entries strictly older than the current version.
 func (s *UpdateService) fetchRollbackCandidates(ctx context.Context) ([]*GitHubRelease, error) {
-	releases, err := s.githubClient.FetchRecentReleases(ctx, githubRepo, rollbackFetchPageSize)
+	repo, err := s.releaseRepo()
+	if err != nil {
+		return nil, err
+	}
+	releases, err := s.githubClient.FetchRecentReleases(ctx, repo, rollbackFetchPageSize)
 	if err != nil {
 		return nil, err
 	}
@@ -403,7 +459,11 @@ func (s *UpdateService) fetchRollbackCandidates(ctx context.Context) ([]*GitHubR
 }
 
 func (s *UpdateService) fetchLatestRelease(ctx context.Context) (*UpdateInfo, error) {
-	release, err := s.githubClient.FetchLatestRelease(ctx, githubRepo)
+	repo, err := s.releaseRepo()
+	if err != nil {
+		return nil, err
+	}
+	release, err := s.githubClient.FetchLatestRelease(ctx, repo)
 	if err != nil {
 		return nil, err
 	}

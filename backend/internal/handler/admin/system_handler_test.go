@@ -34,6 +34,7 @@ type systemHandlerUpdateServiceStub struct {
 	rollbackVersions      []service.RollbackVersion
 	rollbackVersionsErr   error
 	rollbackVersionsCall  int
+	repository            string
 }
 
 func (s *systemHandlerUpdateServiceStub) CheckUpdate(_ context.Context, force bool) (*service.UpdateInfo, error) {
@@ -56,6 +57,10 @@ func (s *systemHandlerUpdateServiceStub) Rollback() error {
 func (s *systemHandlerUpdateServiceStub) ListRollbackVersions(context.Context) ([]service.RollbackVersion, error) {
 	s.rollbackVersionsCall++
 	return s.rollbackVersions, s.rollbackVersionsErr
+}
+
+func (s *systemHandlerUpdateServiceStub) Repository() string {
+	return s.repository
 }
 
 func (s *systemHandlerUpdateServiceStub) RollbackToVersion(ctx context.Context, version string) error {
@@ -286,6 +291,7 @@ func TestSystemHandlerGetRollbackVersions(t *testing.T) {
 			{Version: "0.1.146", PublishedAt: "2026-07-07T00:00:00Z", HTMLURL: "https://example.com/v0.1.146"},
 			{Version: "0.1.145", PublishedAt: "2026-07-06T00:00:00Z", HTMLURL: "https://example.com/v0.1.145"},
 		},
+		repository: "example-owner/example-repo",
 	}
 	repo := newMemoryIdempotencyRepoStub()
 	router := newSystemHandlerTestRouter(t, updateSvc, repo)
@@ -300,13 +306,17 @@ func TestSystemHandlerGetRollbackVersions(t *testing.T) {
 	var body struct {
 		Code int `json:"code"`
 		Data struct {
-			Versions []service.RollbackVersion `json:"versions"`
+			Versions   []service.RollbackVersion `json:"versions"`
+			Repository string                    `json:"repository"`
 		} `json:"data"`
 	}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 	require.Equal(t, 0, body.Code)
 	require.Len(t, body.Data.Versions, 2)
 	require.Equal(t, "0.1.146", body.Data.Versions[0].Version)
+	// The UI builds install/rollback commands from this value, so it must be
+	// reported rather than assumed by the client.
+	require.Equal(t, "example-owner/example-repo", body.Data.Repository)
 }
 
 func TestSystemHandlerGetRollbackVersionsError(t *testing.T) {
