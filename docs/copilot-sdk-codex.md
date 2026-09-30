@@ -33,7 +33,7 @@ Docker 用户先阅读后面的网络说明，不要直接把容器内的 `127.0
 
 ```bash
 sudo git clone --branch production --single-branch \
-  https://github.com/ranxi2001/sub2api.git /opt/sub2api-public
+  https://github.com/OWNER/REPO.git /opt/sub2api-public
 
 sudo mkdir -p /opt/sub2api-copilot
 sudo bash /opt/sub2api-public/deploy/copilot-sdk/prepare.sh \

@@ -119,8 +119,10 @@ https://pay.example.com/pay?user_id=123&token=<jwt>&theme=light&lang=zh&ui_mode=
 - 重试保持相同 `code`，并使用新的 `Idempotency-Key`
 
 ### 6) `doc_url` 配置建议
-- 查看链接：`https://github.com/Wei-Shaw/sub2api/blob/main/docs/ADMIN_PAYMENT_INTEGRATION_API.md`
-- 下载链接：`https://raw.githubusercontent.com/Wei-Shaw/sub2api/main/docs/ADMIN_PAYMENT_INTEGRATION_API.md`
+- 查看链接：`https://github.com/OWNER/REPO/blob/production/docs/ADMIN_PAYMENT_INTEGRATION_API.md`
+- 下载链接：`https://raw.githubusercontent.com/OWNER/REPO/production/docs/ADMIN_PAYMENT_INTEGRATION_API.md`
+
+请把 `OWNER/REPO` 替换为本部署实际使用的仓库地址。
 
 ---
 
@@ -239,5 +241,7 @@ https://pay.example.com/pay?user_id=123&token=<jwt>&theme=light&lang=zh&ui_mode=
 - Keep the same `code` for retry, and use a new `Idempotency-Key`
 
 ### 6) Recommended `doc_url`
-- View URL: `https://github.com/Wei-Shaw/sub2api/blob/main/docs/ADMIN_PAYMENT_INTEGRATION_API.md`
-- Download URL: `https://raw.githubusercontent.com/Wei-Shaw/sub2api/main/docs/ADMIN_PAYMENT_INTEGRATION_API.md`
+- View URL: `https://github.com/OWNER/REPO/blob/production/docs/ADMIN_PAYMENT_INTEGRATION_API.md`
+- Download URL: `https://raw.githubusercontent.com/OWNER/REPO/production/docs/ADMIN_PAYMENT_INTEGRATION_API.md`
+
+Replace `OWNER/REPO` with the repository actually used by this deployment.

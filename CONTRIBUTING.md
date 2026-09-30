@@ -1,8 +1,8 @@
 # 贡献指南
 
-本指南适用于 [ranxi2001/sub2api](https://github.com/ranxi2001/sub2api)。欢迎提交可复现的 Bug、功能建议、文档修正、测试和代码改进。中文或英文均可，保留错误消息、字段名和命令的原文。
+本指南适用于本仓库。欢迎提交可复现的 Bug、功能建议、文档修正、测试和代码改进。中文或英文均可，保留错误消息、字段名和命令的原文。
 
-本 fork 以 `production` 为默认开发和 PR 目标分支，按需引入 [Wei-Shaw/sub2api](https://github.com/Wei-Shaw/sub2api) 的更新。提交前核实仓库与 base 分支，避免把 PR 发到上游 `main`。运维 CLI、监控及生产部署脚本属于 [sub2api-operate](https://github.com/ranxi2001/sub2api-operate)，应用源码改动提交到本仓库。
+本仓库以 `production` 为默认开发和 PR 目标分支。提交前请核实你要提交的仓库与 base 分支，避免发错目标。本项目基于 [Wei-Shaw/sub2api](https://github.com/Wei-Shaw/sub2api) 开发；若要向上游反馈与上游共同存在的问题，请先确认该问题在上游是否同样存在，再提交到上游仓库。
 
 ## Agent 使用建议与披露
 
@@ -20,7 +20,7 @@
 
 ## 选择合适的入口
 
-从 [Issue 选择页](https://github.com/ranxi2001/sub2api/issues/new/choose) 选择表单：
+从 [Issue 选择页](../../issues/new/choose) 选择表单：
 
 | 类型 | 适用情况 | 重点提供 |
 | --- | --- | --- |
@@ -129,7 +129,7 @@ printf '证据保存在 %s；人工脱敏后只分享必要片段。\n' "$repro_
 
 建议按“已观察 / 已验证 / 待验证 / 无法验证的原因”记录排查。对照实验一次改变一个条件，例如客户端版本、stream 开关、代理或通道；记录操作和结果，不要将一次重试成功写成已修复。
 
-[Issue #141](https://github.com/ranxi2001/sub2api/issues/141) 可参考其证据组织方式：记录实际构建、带时区的请求明细、日志关联和证据范围，并将未确定的原因单独说明。它是一份历史事件排查记录，不能直接当作现成的最小复现；提交类似问题仍需要补充可获得的触发条件和样例。
+排查记录建议按“已观察 / 已验证 / 待验证 / 无法验证的原因”组织证据：记录实际构建、带时区的请求明细、日志关联和证据范围，并将未确定的原因单独说明。历史排查记录不能直接当作现成的最小复现；提交类似问题仍需要补充可获得的触发条件和样例。
 
 ## 脱敏与安全报告
 
@@ -153,10 +153,11 @@ printf '证据保存在 %s；人工脱敏后只分享必要片段。\n' "$repro_
 Fork 本仓库后，下面示例中的 `origin` 是自己的 fork，`project` 指向本项目。已有 checkout 先检查 `git remote -v`；不要覆盖已有远端或未提交修改。
 
 ```bash
-# 将 YOUR_GITHUB_LOGIN 替换为自己的 GitHub 用户名。
+# 将 YOUR_GITHUB_LOGIN 替换为自己的 GitHub 用户名，
+# 并将 UPSTREAM_OWNER 换成本仓库所属的账号或组织。
 git clone https://github.com/YOUR_GITHUB_LOGIN/sub2api.git
 cd sub2api
-git remote add project https://github.com/ranxi2001/sub2api.git
+git remote add project https://github.com/UPSTREAM_OWNER/sub2api.git
 git fetch project production
 git switch -c fix/describe-the-change project/production
 ```

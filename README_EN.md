@@ -11,11 +11,11 @@
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED.svg)](https://www.docker.com/)
 
 
-**Sub2API fork maintained by tosky.io**
+**Self-hosted AI API gateway**
 
-[Releases](https://github.com/ranxi2001/sub2api/releases) · [User documentation](https://tosky.io/docs/)
+A self-hosted gateway for distributing and managing API quota from AI product subscriptions.
 
-Based on [Wei-Shaw/sub2api](https://github.com/Wei-Shaw/sub2api), with selected upstream updates and independently maintained features. The default branch is `production`.
+Based on [Wei-Shaw/sub2api](https://github.com/Wei-Shaw/sub2api), with selected upstream updates and independently maintained features.
 
 [中文（默认）](README.md) | English | [日本語](README_JA.md)
 
@@ -85,8 +85,14 @@ One-click installation script that downloads pre-built binaries from GitHub Rele
 
 #### Installation Steps
 
+The installer downloads release assets from a GitHub repository, which has no
+universal default. Set `SUB2API_GITHUB_REPO` to the `owner/repo` that publishes
+the releases you intend to install (replace `owner/repo` and the raw URL with
+your own deployment's):
+
 ```bash
-curl -sSL https://raw.githubusercontent.com/ranxi2001/sub2api/production/deploy/install.sh | sudo bash
+curl -sSL https://raw.githubusercontent.com/owner/repo/production/deploy/install.sh | \
+  SUB2API_GITHUB_REPO=owner/repo sudo -E bash
 ```
 
 The script will:
@@ -136,7 +142,8 @@ sudo journalctl -u sub2api -f
 sudo systemctl restart sub2api
 
 # Uninstall
-curl -sSL https://raw.githubusercontent.com/ranxi2001/sub2api/production/deploy/install.sh | sudo bash -s -- uninstall -y
+curl -sSL https://raw.githubusercontent.com/owner/repo/production/deploy/install.sh | \
+  SUB2API_GITHUB_REPO=owner/repo sudo -E bash -s -- uninstall -y
 ```
 
 ---
@@ -159,7 +166,8 @@ Use the automated deployment script for easy setup:
 mkdir -p sub2api-deploy && cd sub2api-deploy
 
 # Download and run deployment preparation script
-curl -sSL https://raw.githubusercontent.com/ranxi2001/sub2api/production/deploy/docker-deploy.sh | bash
+curl -sSL https://raw.githubusercontent.com/owner/repo/production/deploy/docker-deploy.sh | \
+  SUB2API_GITHUB_REPO=owner/repo bash
 
 # Start services
 docker compose up -d
@@ -181,7 +189,7 @@ If you prefer manual setup:
 
 ```bash
 # 1. Clone the repository
-git clone --branch production https://github.com/ranxi2001/sub2api.git
+git clone --branch production https://github.com/owner/repo.git
 cd sub2api/deploy
 
 # 2. Copy environment configuration
@@ -311,7 +319,7 @@ rm -rf data/ postgres_data/ redis_data/
 Apple-silicon Macs running macOS 26 can run the full Sub2API, PostgreSQL, and Redis stack with Apple `container` 1.1.0 or newer:
 
 ```bash
-git clone --branch production https://github.com/ranxi2001/sub2api.git
+git clone --branch production https://github.com/owner/repo.git
 cd sub2api/deploy
 ./apple-container.sh init
 ./apple-container.sh up
@@ -337,7 +345,7 @@ Build and run from source code for development or customization.
 
 ```bash
 # 1. Clone the repository
-git clone --branch production https://github.com/ranxi2001/sub2api.git
+git clone --branch production https://github.com/owner/repo.git
 cd sub2api
 
 # 2. Install pnpm (if not already installed)
@@ -734,6 +742,8 @@ sub2api/
 This project is licensed under the [GNU Lesser General Public License v3.0](LICENSE) (or later).
 
 Copyright (c) 2026 Wesley Liddick
+
+This project is developed based on [Wei-Shaw/sub2api](https://github.com/Wei-Shaw/sub2api) and keeps its license and copyright notices. The upstream attribution above exists solely to satisfy license attribution requirements; it does not imply endorsement by the original authors, nor any form of cooperation or authorization.
 
 ---
 
