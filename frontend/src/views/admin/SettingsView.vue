@@ -8286,6 +8286,7 @@
               <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
                 {{ t("admin.settings.payment.description") }}
                 <a
+                  v-if="paymentGuideHref"
                   :href="paymentGuideHref"
                   target="_blank"
                   rel="noopener noreferrer"
@@ -8751,6 +8752,7 @@
                   <p class="mt-2 text-xs text-gray-400 dark:text-gray-500">
                     {{ t("admin.settings.payment.enabledPaymentTypesHint") }}
                     <a
+                      v-if="paymentMethodsHref"
                       :href="paymentMethodsHref"
                       target="_blank"
                       rel="noopener noreferrer"
@@ -9364,6 +9366,7 @@ import type {
 import type { ProviderInstance } from "@/types/payment";
 import AppLayout from "@/components/layout/AppLayout.vue";
 import Icon from "@/components/icons/Icon.vue";
+import { useSourceLinks } from "@/utils/sourceLinks";
 import Select, { type SelectOption } from "@/components/common/Select.vue";
 import {
   SITE_BILLING_MODES,
@@ -9421,17 +9424,26 @@ function localText(zh: string, en: string): string {
   return isZhLocale.value ? zh : en;
 }
 
+// 支付文档链接指向本部署自己配置的发布仓库，而不是某个固定仓库：
+// 指向外部仓库会展示该仓库当前的内容，未必与本文档版本一致。
+// 未配置发布仓库时链接为空，模板据此隐藏入口。
+const { blobUrl: sourceBlobUrl } = useSourceLinks();
+
 const paymentGuideHref = computed(() =>
   locale.value.startsWith("zh")
-    ? "https://github.com/Wei-Shaw/sub2api/blob/main/docs/PAYMENT_CN.md"
-    : "https://github.com/Wei-Shaw/sub2api/blob/main/docs/PAYMENT.md",
+    ? sourceBlobUrl("docs/PAYMENT_CN.md")
+    : sourceBlobUrl("docs/PAYMENT.md"),
 );
 
-const paymentMethodsHref = computed(() =>
-  locale.value.startsWith("zh")
-    ? "https://github.com/Wei-Shaw/sub2api/blob/main/docs/PAYMENT_CN.md#支持的支付方式"
-    : "https://github.com/Wei-Shaw/sub2api/blob/main/docs/PAYMENT.md#supported-payment-methods",
-);
+const paymentMethodsHref = computed(() => {
+  const base = locale.value.startsWith("zh")
+    ? sourceBlobUrl("docs/PAYMENT_CN.md")
+    : sourceBlobUrl("docs/PAYMENT.md");
+  if (!base) return "";
+  return locale.value.startsWith("zh")
+    ? `${base}#支持的支付方式`
+    : `${base}#supported-payment-methods`;
+});
 
 type SettingsTab =
   | "general"

@@ -651,9 +651,11 @@ import {
 import { useClipboard } from '@/composables/useClipboard'
 import Icon from '@/components/icons/Icon.vue'
 
-const GITHUB_REPO = 'Wei-Shaw/sub2api'
-// Docker Hub image published by CI (tags carry no "v" prefix, e.g. weishaw/sub2api:0.1.146)
-const DOCKER_IMAGE = 'weishaw/sub2api'
+// Fallbacks only. The deployment's configured release source is preferred and
+// arrives from the backend (see configuredRepository); these placeholders keep
+// the generated commands syntactically valid when nothing is configured.
+const GITHUB_REPO = 'OWNER/REPO'
+const DOCKER_IMAGE = 'sub2api'
 
 const { t } = useI18n()
 
@@ -695,6 +697,8 @@ const rollbackVersionsError = ref('')
 const selectedRollbackVersion = ref('')
 const rollingBack = ref(false)
 const rollbackError = ref('')
+// Repository reported by the backend when the deployment configured one.
+const configuredRepository = ref('')
 
 const { copied, copyToClipboard } = useClipboard()
 
@@ -710,7 +714,8 @@ const manualTabs = computed(() => [
 const scriptRollbackCommand = computed(() => {
   if (!selectedRollbackVersion.value) return ''
   const tag = `v${selectedRollbackVersion.value}`
-  return `curl -sSL https://raw.githubusercontent.com/${GITHUB_REPO}/${tag}/deploy/install.sh | sudo bash -s -- rollback ${tag}`
+  const repo = configuredRepository.value || GITHUB_REPO
+  return `curl -sSL https://raw.githubusercontent.com/${repo}/${tag}/deploy/install.sh | SUB2API_GITHUB_REPO=${repo} sudo -E bash -s -- rollback ${tag}`
 })
 
 const dockerRollbackCommand = computed(() => {
@@ -803,6 +808,11 @@ async function loadRollbackVersions() {
   try {
     const data = await getRollbackVersions()
     rollbackVersions.value = data.versions || []
+    // Prefer the repository the deployment is configured with, so generated
+    // commands point at the right place instead of a built-in repository.
+    if (data.repository) {
+      configuredRepository.value = data.repository
+    }
   } catch (error: unknown) {
     const err = error as { response?: { data?: { message?: string } }; message?: string }
     rollbackVersionsError.value =

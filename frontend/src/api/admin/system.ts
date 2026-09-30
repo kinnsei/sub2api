@@ -54,10 +54,14 @@ export interface RollbackVersionInfo {
 /**
  * Get versions available for rollback (up to 3 versions older than current)
  */
-export async function getRollbackVersions(): Promise<{ versions: RollbackVersionInfo[] }> {
-  const { data } = await apiClient.get<{ versions: RollbackVersionInfo[] }>(
-    '/admin/system/rollback-versions'
-  )
+export async function getRollbackVersions(): Promise<{
+  versions: RollbackVersionInfo[]
+  repository?: string
+}> {
+  const { data } = await apiClient.get<{
+    versions: RollbackVersionInfo[]
+    repository?: string
+  }>('/admin/system/rollback-versions')
   return data
 }
 

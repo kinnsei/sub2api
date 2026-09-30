@@ -166,8 +166,8 @@
                 </router-link>
 
                 <a
-                  v-if="authStore.isAdmin"
-                  href="https://github.com/Wei-Shaw/sub2api"
+                  v-if="authStore.isAdmin && hasRepository"
+                  :href="repositoryUrl"
                   target="_blank"
                   rel="noopener noreferrer"
                   @click="closeDropdown"
@@ -263,6 +263,7 @@ import AnnouncementBell from '@/components/common/AnnouncementBell.vue'
 import Icon from '@/components/icons/Icon.vue'
 import { sanitizeUrl } from '@/utils/url'
 import { FeatureFlags, isFeatureFlagEnabled } from '@/utils/featureFlags'
+import { useSourceLinks } from '@/utils/sourceLinks'
 import { resolveRouteMetaKeys } from '@/router/title'
 import { resolveSiteBillingMode } from '@/utils/siteBillingMode'
 
@@ -279,6 +280,7 @@ const dropdownOpen = ref(false)
 const dropdownRef = ref<HTMLElement | null>(null)
 const contactInfo = computed(() => appStore.contactInfo)
 const docUrl = computed(() => sanitizeUrl(appStore.docUrl))
+const { repositoryUrl, hasRepository } = useSourceLinks()
 const modelPlazaEnabled = computed(() => isFeatureFlagEnabled(FeatureFlags.modelPlaza))
 const avatarUrl = computed(() => user.value?.avatar_url?.trim() || '')
 const availableBalance = computed(() => Number(user.value?.balance || 0))

@@ -88,6 +88,10 @@ const appStoreState = vi.hoisted(() => ({
   cachedPublicSettings: null as Record<string, unknown> | null,
 }))
 
+// vi.mock factories are hoisted above module-level consts, so both module
+// paths need their own inline factory. `@/stores/app` must be mocked too:
+// composables that read site config import that module directly rather than
+// through the barrel.
 vi.mock('@/stores', () => ({
   useAppStore: () => ({
     get cachedPublicSettings() {
@@ -96,6 +100,25 @@ vi.mock('@/stores', () => ({
     siteName: 'Sub2API',
     siteLogo: '',
     docUrl: '',
+    // Source links resolve from the deployment's configured repository.
+    sourceRepository: 'example-owner/example-repo',
+    publicSettingsLoaded: true,
+    fetchPublicSettings,
+    showInfo,
+    showSuccess,
+    showError,
+  }),
+}))
+
+vi.mock('@/stores/app', () => ({
+  useAppStore: () => ({
+    get cachedPublicSettings() {
+      return appStoreState.cachedPublicSettings
+    },
+    siteName: 'Sub2API',
+    siteLogo: '',
+    docUrl: '',
+    sourceRepository: 'example-owner/example-repo',
     publicSettingsLoaded: true,
     fetchPublicSettings,
     showInfo,
