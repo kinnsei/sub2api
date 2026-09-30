@@ -405,6 +405,20 @@ func (_u *PaymentOrderUpdate) ClearProviderKey() *PaymentOrderUpdate {
 	return _u
 }
 
+// SetCurrency sets the "currency" field.
+func (_u *PaymentOrderUpdate) SetCurrency(v string) *PaymentOrderUpdate {
+	_u.mutation.SetCurrency(v)
+	return _u
+}
+
+// SetNillableCurrency sets the "currency" field if the given value is not nil.
+func (_u *PaymentOrderUpdate) SetNillableCurrency(v *string) *PaymentOrderUpdate {
+	if v != nil {
+		_u.SetCurrency(*v)
+	}
+	return _u
+}
+
 // SetProviderSnapshot sets the "provider_snapshot" field.
 func (_u *PaymentOrderUpdate) SetProviderSnapshot(v map[string]interface{}) *PaymentOrderUpdate {
 	_u.mutation.SetProviderSnapshot(v)
@@ -660,6 +674,27 @@ func (_u *PaymentOrderUpdate) ClearFailedReason() *PaymentOrderUpdate {
 	return _u
 }
 
+// SetFulfillmentAttempts sets the "fulfillment_attempts" field.
+func (_u *PaymentOrderUpdate) SetFulfillmentAttempts(v int) *PaymentOrderUpdate {
+	_u.mutation.ResetFulfillmentAttempts()
+	_u.mutation.SetFulfillmentAttempts(v)
+	return _u
+}
+
+// SetNillableFulfillmentAttempts sets the "fulfillment_attempts" field if the given value is not nil.
+func (_u *PaymentOrderUpdate) SetNillableFulfillmentAttempts(v *int) *PaymentOrderUpdate {
+	if v != nil {
+		_u.SetFulfillmentAttempts(*v)
+	}
+	return _u
+}
+
+// AddFulfillmentAttempts adds value to the "fulfillment_attempts" field.
+func (_u *PaymentOrderUpdate) AddFulfillmentAttempts(v int) *PaymentOrderUpdate {
+	_u.mutation.AddFulfillmentAttempts(v)
+	return _u
+}
+
 // SetClientIP sets the "client_ip" field.
 func (_u *PaymentOrderUpdate) SetClientIP(v string) *PaymentOrderUpdate {
 	_u.mutation.SetClientIP(v)
@@ -813,6 +848,11 @@ func (_u *PaymentOrderUpdate) check() error {
 			return &ValidationError{Name: "provider_key", err: fmt.Errorf(`ent: validator failed for field "PaymentOrder.provider_key": %w`, err)}
 		}
 	}
+	if v, ok := _u.mutation.Currency(); ok {
+		if err := paymentorder.CurrencyValidator(v); err != nil {
+			return &ValidationError{Name: "currency", err: fmt.Errorf(`ent: validator failed for field "PaymentOrder.currency": %w`, err)}
+		}
+	}
 	if v, ok := _u.mutation.Status(); ok {
 		if err := paymentorder.StatusValidator(v); err != nil {
 			return &ValidationError{Name: "status", err: fmt.Errorf(`ent: validator failed for field "PaymentOrder.status": %w`, err)}
@@ -953,6 +993,9 @@ func (_u *PaymentOrderUpdate) sqlSave(ctx context.Context) (_node int, err error
 	if _u.mutation.ProviderKeyCleared() {
 		_spec.ClearField(paymentorder.FieldProviderKey, field.TypeString)
 	}
+	if value, ok := _u.mutation.Currency(); ok {
+		_spec.SetField(paymentorder.FieldCurrency, field.TypeString, value)
+	}
 	if value, ok := _u.mutation.ProviderSnapshot(); ok {
 		_spec.SetField(paymentorder.FieldProviderSnapshot, field.TypeJSON, value)
 	}
@@ -1027,6 +1070,12 @@ func (_u *PaymentOrderUpdate) sqlSave(ctx context.Context) (_node int, err error
 	}
 	if _u.mutation.FailedReasonCleared() {
 		_spec.ClearField(paymentorder.FieldFailedReason, field.TypeString)
+	}
+	if value, ok := _u.mutation.FulfillmentAttempts(); ok {
+		_spec.SetField(paymentorder.FieldFulfillmentAttempts, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedFulfillmentAttempts(); ok {
+		_spec.AddField(paymentorder.FieldFulfillmentAttempts, field.TypeInt, value)
 	}
 	if value, ok := _u.mutation.ClientIP(); ok {
 		_spec.SetField(paymentorder.FieldClientIP, field.TypeString, value)
@@ -1468,6 +1517,20 @@ func (_u *PaymentOrderUpdateOne) ClearProviderKey() *PaymentOrderUpdateOne {
 	return _u
 }
 
+// SetCurrency sets the "currency" field.
+func (_u *PaymentOrderUpdateOne) SetCurrency(v string) *PaymentOrderUpdateOne {
+	_u.mutation.SetCurrency(v)
+	return _u
+}
+
+// SetNillableCurrency sets the "currency" field if the given value is not nil.
+func (_u *PaymentOrderUpdateOne) SetNillableCurrency(v *string) *PaymentOrderUpdateOne {
+	if v != nil {
+		_u.SetCurrency(*v)
+	}
+	return _u
+}
+
 // SetProviderSnapshot sets the "provider_snapshot" field.
 func (_u *PaymentOrderUpdateOne) SetProviderSnapshot(v map[string]interface{}) *PaymentOrderUpdateOne {
 	_u.mutation.SetProviderSnapshot(v)
@@ -1723,6 +1786,27 @@ func (_u *PaymentOrderUpdateOne) ClearFailedReason() *PaymentOrderUpdateOne {
 	return _u
 }
 
+// SetFulfillmentAttempts sets the "fulfillment_attempts" field.
+func (_u *PaymentOrderUpdateOne) SetFulfillmentAttempts(v int) *PaymentOrderUpdateOne {
+	_u.mutation.ResetFulfillmentAttempts()
+	_u.mutation.SetFulfillmentAttempts(v)
+	return _u
+}
+
+// SetNillableFulfillmentAttempts sets the "fulfillment_attempts" field if the given value is not nil.
+func (_u *PaymentOrderUpdateOne) SetNillableFulfillmentAttempts(v *int) *PaymentOrderUpdateOne {
+	if v != nil {
+		_u.SetFulfillmentAttempts(*v)
+	}
+	return _u
+}
+
+// AddFulfillmentAttempts adds value to the "fulfillment_attempts" field.
+func (_u *PaymentOrderUpdateOne) AddFulfillmentAttempts(v int) *PaymentOrderUpdateOne {
+	_u.mutation.AddFulfillmentAttempts(v)
+	return _u
+}
+
 // SetClientIP sets the "client_ip" field.
 func (_u *PaymentOrderUpdateOne) SetClientIP(v string) *PaymentOrderUpdateOne {
 	_u.mutation.SetClientIP(v)
@@ -1889,6 +1973,11 @@ func (_u *PaymentOrderUpdateOne) check() error {
 			return &ValidationError{Name: "provider_key", err: fmt.Errorf(`ent: validator failed for field "PaymentOrder.provider_key": %w`, err)}
 		}
 	}
+	if v, ok := _u.mutation.Currency(); ok {
+		if err := paymentorder.CurrencyValidator(v); err != nil {
+			return &ValidationError{Name: "currency", err: fmt.Errorf(`ent: validator failed for field "PaymentOrder.currency": %w`, err)}
+		}
+	}
 	if v, ok := _u.mutation.Status(); ok {
 		if err := paymentorder.StatusValidator(v); err != nil {
 			return &ValidationError{Name: "status", err: fmt.Errorf(`ent: validator failed for field "PaymentOrder.status": %w`, err)}
@@ -2046,6 +2135,9 @@ func (_u *PaymentOrderUpdateOne) sqlSave(ctx context.Context) (_node *PaymentOrd
 	if _u.mutation.ProviderKeyCleared() {
 		_spec.ClearField(paymentorder.FieldProviderKey, field.TypeString)
 	}
+	if value, ok := _u.mutation.Currency(); ok {
+		_spec.SetField(paymentorder.FieldCurrency, field.TypeString, value)
+	}
 	if value, ok := _u.mutation.ProviderSnapshot(); ok {
 		_spec.SetField(paymentorder.FieldProviderSnapshot, field.TypeJSON, value)
 	}
@@ -2120,6 +2212,12 @@ func (_u *PaymentOrderUpdateOne) sqlSave(ctx context.Context) (_node *PaymentOrd
 	}
 	if _u.mutation.FailedReasonCleared() {
 		_spec.ClearField(paymentorder.FieldFailedReason, field.TypeString)
+	}
+	if value, ok := _u.mutation.FulfillmentAttempts(); ok {
+		_spec.SetField(paymentorder.FieldFulfillmentAttempts, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedFulfillmentAttempts(); ok {
+		_spec.AddField(paymentorder.FieldFulfillmentAttempts, field.TypeInt, value)
 	}
 	if value, ok := _u.mutation.ClientIP(); ok {
 		_spec.SetField(paymentorder.FieldClientIP, field.TypeString, value)

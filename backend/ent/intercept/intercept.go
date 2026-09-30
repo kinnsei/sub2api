@@ -30,6 +30,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/ent/paymentauditlog"
 	"github.com/Wei-Shaw/sub2api/ent/paymentorder"
 	"github.com/Wei-Shaw/sub2api/ent/paymentproviderinstance"
+	"github.com/Wei-Shaw/sub2api/ent/paymentrefund"
 	"github.com/Wei-Shaw/sub2api/ent/pendingauthsession"
 	"github.com/Wei-Shaw/sub2api/ent/predicate"
 	"github.com/Wei-Shaw/sub2api/ent/promocode"
@@ -700,6 +701,33 @@ func (f TraversePaymentProviderInstance) Traverse(ctx context.Context, q ent.Que
 	return fmt.Errorf("unexpected query type %T. expect *ent.PaymentProviderInstanceQuery", q)
 }
 
+// The PaymentRefundFunc type is an adapter to allow the use of ordinary function as a Querier.
+type PaymentRefundFunc func(context.Context, *ent.PaymentRefundQuery) (ent.Value, error)
+
+// Query calls f(ctx, q).
+func (f PaymentRefundFunc) Query(ctx context.Context, q ent.Query) (ent.Value, error) {
+	if q, ok := q.(*ent.PaymentRefundQuery); ok {
+		return f(ctx, q)
+	}
+	return nil, fmt.Errorf("unexpected query type %T. expect *ent.PaymentRefundQuery", q)
+}
+
+// The TraversePaymentRefund type is an adapter to allow the use of ordinary function as Traverser.
+type TraversePaymentRefund func(context.Context, *ent.PaymentRefundQuery) error
+
+// Intercept is a dummy implementation of Intercept that returns the next Querier in the pipeline.
+func (f TraversePaymentRefund) Intercept(next ent.Querier) ent.Querier {
+	return next
+}
+
+// Traverse calls f(ctx, q).
+func (f TraversePaymentRefund) Traverse(ctx context.Context, q ent.Query) error {
+	if q, ok := q.(*ent.PaymentRefundQuery); ok {
+		return f(ctx, q)
+	}
+	return fmt.Errorf("unexpected query type %T. expect *ent.PaymentRefundQuery", q)
+}
+
 // The PendingAuthSessionFunc type is an adapter to allow the use of ordinary function as a Querier.
 type PendingAuthSessionFunc func(context.Context, *ent.PendingAuthSessionQuery) (ent.Value, error)
 
@@ -1206,6 +1234,8 @@ func NewQuery(q ent.Query) (Query, error) {
 		return &query[*ent.PaymentOrderQuery, predicate.PaymentOrder, paymentorder.OrderOption]{typ: ent.TypePaymentOrder, tq: q}, nil
 	case *ent.PaymentProviderInstanceQuery:
 		return &query[*ent.PaymentProviderInstanceQuery, predicate.PaymentProviderInstance, paymentproviderinstance.OrderOption]{typ: ent.TypePaymentProviderInstance, tq: q}, nil
+	case *ent.PaymentRefundQuery:
+		return &query[*ent.PaymentRefundQuery, predicate.PaymentRefund, paymentrefund.OrderOption]{typ: ent.TypePaymentRefund, tq: q}, nil
 	case *ent.PendingAuthSessionQuery:
 		return &query[*ent.PendingAuthSessionQuery, predicate.PendingAuthSession, pendingauthsession.OrderOption]{typ: ent.TypePendingAuthSession, tq: q}, nil
 	case *ent.PromoCodeQuery:

@@ -95,6 +95,15 @@ func (PaymentOrder) Fields() []ent.Field {
 			Optional().
 			Nillable().
 			MaxLen(30),
+		// currency 是订单**实际结算币种**，在下单时确定并冻结。
+		//
+		// 此前只能从 provider_snapshot JSON 反推，而该快照只对 Stripe/Airwallex/
+		// 微信写入 currency：支付宝与 EasyPay 订单无从反推，只能默认 CNY。把币种
+		// 显式落列后，所有渠道的币种都在下单时确定，后续金额容差
+		// （paymentAmountToleranceForCurrency）与展示都不再依赖快照内容。
+		field.String("currency").
+			MaxLen(3).
+			Default(""),
 		field.JSON("provider_snapshot", map[string]any{}).
 			Optional().
 			SchemaType(map[string]string{dialect.Postgres: "jsonb"}),
@@ -151,6 +160,15 @@ func (PaymentOrder) Fields() []ent.Field {
 			Nillable().
 			SchemaType(map[string]string{dialect.Postgres: "text"}),
 
+		// 履约自动重试次数。
+		//
+		// 该计数原本通过统计 FULFILLMENT_FAILED 审计行得出，但审计日志在
+		// (order_id, action) 上有唯一索引（131 号迁移），同一订单最多只有一行，
+		// 因此计数永远停在 1，达不到重试上限（5），卡住的订单会被无限重试。
+		// 计数改为本列持久化，审计行仅保留为人类可读的观测记录。
+		field.Int("fulfillment_attempts").
+			Default(0),
+
 		// 来源信息
 		field.String("client_ip").
 			MaxLen(50),
@@ -195,5 +213,10 @@ func (PaymentOrder) Indexes() []ent.Index {
 		index.Fields("paid_at"),
 		index.Fields("payment_type", "paid_at"),
 		index.Fields("order_type"),
+		// 下单限额校验按实例/套餐统计在途订单。
+		index.Fields("provider_instance_id").
+			StorageKey("idx_payment_orders_provider_instance_id"),
+		index.Fields("plan_id").
+			StorageKey("idx_payment_orders_plan_id"),
 	}
 }

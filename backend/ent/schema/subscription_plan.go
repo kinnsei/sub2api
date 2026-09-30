@@ -43,6 +43,12 @@ func (SubscriptionPlan) Fields() []ent.Field {
 			SchemaType(map[string]string{dialect.Postgres: "decimal(20,2)"}).
 			Optional().
 			Nillable(),
+		// currency 是**展示标签**，不是定价币种。
+		//
+		// 定价与支付金额恒按 payment.DefaultPaymentCurrency 计算
+		// （internal/payment/amount.go），本列只随套餐返回给前端展示，不参与任何
+		// 金额换算。若将来真的要支持多币种定价，必须同时改造金额计算与网关下单
+		// 路径，而不能只写这一列。
 		field.String("currency").
 			MaxLen(3).
 			Default(""),

@@ -50,5 +50,16 @@ func (PaymentAuditLog) Fields() []ent.Field {
 func (PaymentAuditLog) Indexes() []ent.Index {
 	return []ent.Index{
 		index.Fields("order_id"),
+		// 该唯一索引在生产库由 131 号迁移建立（idx_payment_audit_logs_order_action_uniq）。
+		// 这里显式声明，是为了让 enttest 用的 SQLite 也具备同样的约束：
+		// 此前它只存在于生产库，导致「审计行每个 (order_id, action) 只能有一条」
+		// 这一关键前提在单元测试里完全不成立，相关缺陷（重复退款超额、
+		// 履约重试上限永不生效）无法被测试发现。
+		index.Fields("order_id", "action").
+			Unique().
+			StorageKey("idx_payment_audit_logs_order_action_uniq"),
+		// 取消频率限制查询 (action, operator, created_at)。
+		index.Fields("action", "operator", "created_at").
+			StorageKey("idx_payment_audit_logs_action_operator_created_at"),
 	}
 }

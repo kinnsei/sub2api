@@ -58,6 +58,8 @@ type Tx struct {
 	PaymentOrder *PaymentOrderClient
 	// PaymentProviderInstance is the client for interacting with the PaymentProviderInstance builders.
 	PaymentProviderInstance *PaymentProviderInstanceClient
+	// PaymentRefund is the client for interacting with the PaymentRefund builders.
+	PaymentRefund *PaymentRefundClient
 	// PendingAuthSession is the client for interacting with the PendingAuthSession builders.
 	PendingAuthSession *PendingAuthSessionClient
 	// PromoCode is the client for interacting with the PromoCode builders.
@@ -245,6 +247,7 @@ func (tx *Tx) init() {
 	tx.PaymentAuditLog = NewPaymentAuditLogClient(tx.config)
 	tx.PaymentOrder = NewPaymentOrderClient(tx.config)
 	tx.PaymentProviderInstance = NewPaymentProviderInstanceClient(tx.config)
+	tx.PaymentRefund = NewPaymentRefundClient(tx.config)
 	tx.PendingAuthSession = NewPendingAuthSessionClient(tx.config)
 	tx.PromoCode = NewPromoCodeClient(tx.config)
 	tx.PromoCodeUsage = NewPromoCodeUsageClient(tx.config)

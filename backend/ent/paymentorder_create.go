@@ -239,6 +239,20 @@ func (_c *PaymentOrderCreate) SetNillableProviderKey(v *string) *PaymentOrderCre
 	return _c
 }
 
+// SetCurrency sets the "currency" field.
+func (_c *PaymentOrderCreate) SetCurrency(v string) *PaymentOrderCreate {
+	_c.mutation.SetCurrency(v)
+	return _c
+}
+
+// SetNillableCurrency sets the "currency" field if the given value is not nil.
+func (_c *PaymentOrderCreate) SetNillableCurrency(v *string) *PaymentOrderCreate {
+	if v != nil {
+		_c.SetCurrency(*v)
+	}
+	return _c
+}
+
 // SetProviderSnapshot sets the "provider_snapshot" field.
 func (_c *PaymentOrderCreate) SetProviderSnapshot(v map[string]interface{}) *PaymentOrderCreate {
 	_c.mutation.SetProviderSnapshot(v)
@@ -419,6 +433,20 @@ func (_c *PaymentOrderCreate) SetNillableFailedReason(v *string) *PaymentOrderCr
 	return _c
 }
 
+// SetFulfillmentAttempts sets the "fulfillment_attempts" field.
+func (_c *PaymentOrderCreate) SetFulfillmentAttempts(v int) *PaymentOrderCreate {
+	_c.mutation.SetFulfillmentAttempts(v)
+	return _c
+}
+
+// SetNillableFulfillmentAttempts sets the "fulfillment_attempts" field if the given value is not nil.
+func (_c *PaymentOrderCreate) SetNillableFulfillmentAttempts(v *int) *PaymentOrderCreate {
+	if v != nil {
+		_c.SetFulfillmentAttempts(*v)
+	}
+	return _c
+}
+
 // SetClientIP sets the "client_ip" field.
 func (_c *PaymentOrderCreate) SetClientIP(v string) *PaymentOrderCreate {
 	_c.mutation.SetClientIP(v)
@@ -525,6 +553,10 @@ func (_c *PaymentOrderCreate) defaults() {
 		v := paymentorder.DefaultOrderType
 		_c.mutation.SetOrderType(v)
 	}
+	if _, ok := _c.mutation.Currency(); !ok {
+		v := paymentorder.DefaultCurrency
+		_c.mutation.SetCurrency(v)
+	}
 	if _, ok := _c.mutation.Status(); !ok {
 		v := paymentorder.DefaultStatus
 		_c.mutation.SetStatus(v)
@@ -536,6 +568,10 @@ func (_c *PaymentOrderCreate) defaults() {
 	if _, ok := _c.mutation.ForceRefund(); !ok {
 		v := paymentorder.DefaultForceRefund
 		_c.mutation.SetForceRefund(v)
+	}
+	if _, ok := _c.mutation.FulfillmentAttempts(); !ok {
+		v := paymentorder.DefaultFulfillmentAttempts
+		_c.mutation.SetFulfillmentAttempts(v)
 	}
 	if _, ok := _c.mutation.CreatedAt(); !ok {
 		v := paymentorder.DefaultCreatedAt()
@@ -627,6 +663,14 @@ func (_c *PaymentOrderCreate) check() error {
 			return &ValidationError{Name: "provider_key", err: fmt.Errorf(`ent: validator failed for field "PaymentOrder.provider_key": %w`, err)}
 		}
 	}
+	if _, ok := _c.mutation.Currency(); !ok {
+		return &ValidationError{Name: "currency", err: errors.New(`ent: missing required field "PaymentOrder.currency"`)}
+	}
+	if v, ok := _c.mutation.Currency(); ok {
+		if err := paymentorder.CurrencyValidator(v); err != nil {
+			return &ValidationError{Name: "currency", err: fmt.Errorf(`ent: validator failed for field "PaymentOrder.currency": %w`, err)}
+		}
+	}
 	if _, ok := _c.mutation.Status(); !ok {
 		return &ValidationError{Name: "status", err: errors.New(`ent: missing required field "PaymentOrder.status"`)}
 	}
@@ -648,6 +692,9 @@ func (_c *PaymentOrderCreate) check() error {
 	}
 	if _, ok := _c.mutation.ExpiresAt(); !ok {
 		return &ValidationError{Name: "expires_at", err: errors.New(`ent: missing required field "PaymentOrder.expires_at"`)}
+	}
+	if _, ok := _c.mutation.FulfillmentAttempts(); !ok {
+		return &ValidationError{Name: "fulfillment_attempts", err: errors.New(`ent: missing required field "PaymentOrder.fulfillment_attempts"`)}
 	}
 	if _, ok := _c.mutation.ClientIP(); !ok {
 		return &ValidationError{Name: "client_ip", err: errors.New(`ent: missing required field "PaymentOrder.client_ip"`)}
@@ -777,6 +824,10 @@ func (_c *PaymentOrderCreate) createSpec() (*PaymentOrder, *sqlgraph.CreateSpec)
 		_spec.SetField(paymentorder.FieldProviderKey, field.TypeString, value)
 		_node.ProviderKey = &value
 	}
+	if value, ok := _c.mutation.Currency(); ok {
+		_spec.SetField(paymentorder.FieldCurrency, field.TypeString, value)
+		_node.Currency = value
+	}
 	if value, ok := _c.mutation.ProviderSnapshot(); ok {
 		_spec.SetField(paymentorder.FieldProviderSnapshot, field.TypeJSON, value)
 		_node.ProviderSnapshot = value
@@ -832,6 +883,10 @@ func (_c *PaymentOrderCreate) createSpec() (*PaymentOrder, *sqlgraph.CreateSpec)
 	if value, ok := _c.mutation.FailedReason(); ok {
 		_spec.SetField(paymentorder.FieldFailedReason, field.TypeString, value)
 		_node.FailedReason = &value
+	}
+	if value, ok := _c.mutation.FulfillmentAttempts(); ok {
+		_spec.SetField(paymentorder.FieldFulfillmentAttempts, field.TypeInt, value)
+		_node.FulfillmentAttempts = value
 	}
 	if value, ok := _c.mutation.ClientIP(); ok {
 		_spec.SetField(paymentorder.FieldClientIP, field.TypeString, value)
@@ -1252,6 +1307,18 @@ func (u *PaymentOrderUpsert) ClearProviderKey() *PaymentOrderUpsert {
 	return u
 }
 
+// SetCurrency sets the "currency" field.
+func (u *PaymentOrderUpsert) SetCurrency(v string) *PaymentOrderUpsert {
+	u.Set(paymentorder.FieldCurrency, v)
+	return u
+}
+
+// UpdateCurrency sets the "currency" field to the value that was provided on create.
+func (u *PaymentOrderUpsert) UpdateCurrency() *PaymentOrderUpsert {
+	u.SetExcluded(paymentorder.FieldCurrency)
+	return u
+}
+
 // SetProviderSnapshot sets the "provider_snapshot" field.
 func (u *PaymentOrderUpsert) SetProviderSnapshot(v map[string]interface{}) *PaymentOrderUpsert {
 	u.Set(paymentorder.FieldProviderSnapshot, v)
@@ -1483,6 +1550,24 @@ func (u *PaymentOrderUpsert) UpdateFailedReason() *PaymentOrderUpsert {
 // ClearFailedReason clears the value of the "failed_reason" field.
 func (u *PaymentOrderUpsert) ClearFailedReason() *PaymentOrderUpsert {
 	u.SetNull(paymentorder.FieldFailedReason)
+	return u
+}
+
+// SetFulfillmentAttempts sets the "fulfillment_attempts" field.
+func (u *PaymentOrderUpsert) SetFulfillmentAttempts(v int) *PaymentOrderUpsert {
+	u.Set(paymentorder.FieldFulfillmentAttempts, v)
+	return u
+}
+
+// UpdateFulfillmentAttempts sets the "fulfillment_attempts" field to the value that was provided on create.
+func (u *PaymentOrderUpsert) UpdateFulfillmentAttempts() *PaymentOrderUpsert {
+	u.SetExcluded(paymentorder.FieldFulfillmentAttempts)
+	return u
+}
+
+// AddFulfillmentAttempts adds v to the "fulfillment_attempts" field.
+func (u *PaymentOrderUpsert) AddFulfillmentAttempts(v int) *PaymentOrderUpsert {
+	u.Add(paymentorder.FieldFulfillmentAttempts, v)
 	return u
 }
 
@@ -1970,6 +2055,20 @@ func (u *PaymentOrderUpsertOne) ClearProviderKey() *PaymentOrderUpsertOne {
 	})
 }
 
+// SetCurrency sets the "currency" field.
+func (u *PaymentOrderUpsertOne) SetCurrency(v string) *PaymentOrderUpsertOne {
+	return u.Update(func(s *PaymentOrderUpsert) {
+		s.SetCurrency(v)
+	})
+}
+
+// UpdateCurrency sets the "currency" field to the value that was provided on create.
+func (u *PaymentOrderUpsertOne) UpdateCurrency() *PaymentOrderUpsertOne {
+	return u.Update(func(s *PaymentOrderUpsert) {
+		s.UpdateCurrency()
+	})
+}
+
 // SetProviderSnapshot sets the "provider_snapshot" field.
 func (u *PaymentOrderUpsertOne) SetProviderSnapshot(v map[string]interface{}) *PaymentOrderUpsertOne {
 	return u.Update(func(s *PaymentOrderUpsert) {
@@ -2240,6 +2339,27 @@ func (u *PaymentOrderUpsertOne) UpdateFailedReason() *PaymentOrderUpsertOne {
 func (u *PaymentOrderUpsertOne) ClearFailedReason() *PaymentOrderUpsertOne {
 	return u.Update(func(s *PaymentOrderUpsert) {
 		s.ClearFailedReason()
+	})
+}
+
+// SetFulfillmentAttempts sets the "fulfillment_attempts" field.
+func (u *PaymentOrderUpsertOne) SetFulfillmentAttempts(v int) *PaymentOrderUpsertOne {
+	return u.Update(func(s *PaymentOrderUpsert) {
+		s.SetFulfillmentAttempts(v)
+	})
+}
+
+// AddFulfillmentAttempts adds v to the "fulfillment_attempts" field.
+func (u *PaymentOrderUpsertOne) AddFulfillmentAttempts(v int) *PaymentOrderUpsertOne {
+	return u.Update(func(s *PaymentOrderUpsert) {
+		s.AddFulfillmentAttempts(v)
+	})
+}
+
+// UpdateFulfillmentAttempts sets the "fulfillment_attempts" field to the value that was provided on create.
+func (u *PaymentOrderUpsertOne) UpdateFulfillmentAttempts() *PaymentOrderUpsertOne {
+	return u.Update(func(s *PaymentOrderUpsert) {
+		s.UpdateFulfillmentAttempts()
 	})
 }
 
@@ -2902,6 +3022,20 @@ func (u *PaymentOrderUpsertBulk) ClearProviderKey() *PaymentOrderUpsertBulk {
 	})
 }
 
+// SetCurrency sets the "currency" field.
+func (u *PaymentOrderUpsertBulk) SetCurrency(v string) *PaymentOrderUpsertBulk {
+	return u.Update(func(s *PaymentOrderUpsert) {
+		s.SetCurrency(v)
+	})
+}
+
+// UpdateCurrency sets the "currency" field to the value that was provided on create.
+func (u *PaymentOrderUpsertBulk) UpdateCurrency() *PaymentOrderUpsertBulk {
+	return u.Update(func(s *PaymentOrderUpsert) {
+		s.UpdateCurrency()
+	})
+}
+
 // SetProviderSnapshot sets the "provider_snapshot" field.
 func (u *PaymentOrderUpsertBulk) SetProviderSnapshot(v map[string]interface{}) *PaymentOrderUpsertBulk {
 	return u.Update(func(s *PaymentOrderUpsert) {
@@ -3172,6 +3306,27 @@ func (u *PaymentOrderUpsertBulk) UpdateFailedReason() *PaymentOrderUpsertBulk {
 func (u *PaymentOrderUpsertBulk) ClearFailedReason() *PaymentOrderUpsertBulk {
 	return u.Update(func(s *PaymentOrderUpsert) {
 		s.ClearFailedReason()
+	})
+}
+
+// SetFulfillmentAttempts sets the "fulfillment_attempts" field.
+func (u *PaymentOrderUpsertBulk) SetFulfillmentAttempts(v int) *PaymentOrderUpsertBulk {
+	return u.Update(func(s *PaymentOrderUpsert) {
+		s.SetFulfillmentAttempts(v)
+	})
+}
+
+// AddFulfillmentAttempts adds v to the "fulfillment_attempts" field.
+func (u *PaymentOrderUpsertBulk) AddFulfillmentAttempts(v int) *PaymentOrderUpsertBulk {
+	return u.Update(func(s *PaymentOrderUpsert) {
+		s.AddFulfillmentAttempts(v)
+	})
+}
+
+// UpdateFulfillmentAttempts sets the "fulfillment_attempts" field to the value that was provided on create.
+func (u *PaymentOrderUpsertBulk) UpdateFulfillmentAttempts() *PaymentOrderUpsertBulk {
+	return u.Update(func(s *PaymentOrderUpsert) {
+		s.UpdateFulfillmentAttempts()
 	})
 }
 

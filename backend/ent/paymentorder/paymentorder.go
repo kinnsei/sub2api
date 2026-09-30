@@ -54,6 +54,8 @@ const (
 	FieldProviderInstanceID = "provider_instance_id"
 	// FieldProviderKey holds the string denoting the provider_key field in the database.
 	FieldProviderKey = "provider_key"
+	// FieldCurrency holds the string denoting the currency field in the database.
+	FieldCurrency = "currency"
 	// FieldProviderSnapshot holds the string denoting the provider_snapshot field in the database.
 	FieldProviderSnapshot = "provider_snapshot"
 	// FieldStatus holds the string denoting the status field in the database.
@@ -82,6 +84,8 @@ const (
 	FieldFailedAt = "failed_at"
 	// FieldFailedReason holds the string denoting the failed_reason field in the database.
 	FieldFailedReason = "failed_reason"
+	// FieldFulfillmentAttempts holds the string denoting the fulfillment_attempts field in the database.
+	FieldFulfillmentAttempts = "fulfillment_attempts"
 	// FieldClientIP holds the string denoting the client_ip field in the database.
 	FieldClientIP = "client_ip"
 	// FieldSrcHost holds the string denoting the src_host field in the database.
@@ -128,6 +132,7 @@ var Columns = []string{
 	FieldSubscriptionDays,
 	FieldProviderInstanceID,
 	FieldProviderKey,
+	FieldCurrency,
 	FieldProviderSnapshot,
 	FieldStatus,
 	FieldRefundAmount,
@@ -142,6 +147,7 @@ var Columns = []string{
 	FieldCompletedAt,
 	FieldFailedAt,
 	FieldFailedReason,
+	FieldFulfillmentAttempts,
 	FieldClientIP,
 	FieldSrcHost,
 	FieldSrcURL,
@@ -184,6 +190,10 @@ var (
 	ProviderInstanceIDValidator func(string) error
 	// ProviderKeyValidator is a validator for the "provider_key" field. It is called by the builders before save.
 	ProviderKeyValidator func(string) error
+	// DefaultCurrency holds the default value on creation for the "currency" field.
+	DefaultCurrency string
+	// CurrencyValidator is a validator for the "currency" field. It is called by the builders before save.
+	CurrencyValidator func(string) error
 	// DefaultStatus holds the default value on creation for the "status" field.
 	DefaultStatus string
 	// StatusValidator is a validator for the "status" field. It is called by the builders before save.
@@ -194,6 +204,8 @@ var (
 	DefaultForceRefund bool
 	// RefundRequestedByValidator is a validator for the "refund_requested_by" field. It is called by the builders before save.
 	RefundRequestedByValidator func(string) error
+	// DefaultFulfillmentAttempts holds the default value on creation for the "fulfillment_attempts" field.
+	DefaultFulfillmentAttempts int
 	// ClientIPValidator is a validator for the "client_ip" field. It is called by the builders before save.
 	ClientIPValidator func(string) error
 	// SrcHostValidator is a validator for the "src_host" field. It is called by the builders before save.
@@ -314,6 +326,11 @@ func ByProviderKey(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldProviderKey, opts...).ToFunc()
 }
 
+// ByCurrency orders the results by the currency field.
+func ByCurrency(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldCurrency, opts...).ToFunc()
+}
+
 // ByStatus orders the results by the status field.
 func ByStatus(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldStatus, opts...).ToFunc()
@@ -377,6 +394,11 @@ func ByFailedAt(opts ...sql.OrderTermOption) OrderOption {
 // ByFailedReason orders the results by the failed_reason field.
 func ByFailedReason(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldFailedReason, opts...).ToFunc()
+}
+
+// ByFulfillmentAttempts orders the results by the fulfillment_attempts field.
+func ByFulfillmentAttempts(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldFulfillmentAttempts, opts...).ToFunc()
 }
 
 // ByClientIP orders the results by the client_ip field.
