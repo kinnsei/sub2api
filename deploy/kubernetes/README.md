@@ -54,8 +54,8 @@ Secret 的 config.yaml 使用 subPath，更新后需要重建 Pod。PVC 用于�
 
 ```yaml
 images:
-  - name: ghcr.io/ranxi2001/sub2api
-    newName: ghcr.io/ranxi2001/sub2api
+  - name: ghcr.io/OWNER/REPO
+    newName: ghcr.io/OWNER/REPO
     digest: sha256:填写实际镜像摘要
 ```
 

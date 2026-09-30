@@ -84,9 +84,13 @@ RUN VERSION_VALUE="${VERSION}" && \
 FROM ${ALPINE_IMAGE}
 
 # Labels
-LABEL maintainer="Wei-Shaw <github.com/Wei-Shaw>"
+# Override these at build time to attribute the image to your own deployment:
+#   docker build --build-arg OCI_SOURCE=https://github.com/OWNER/REPO .
+ARG MAINTAINER="Sub2API contributors"
+ARG OCI_SOURCE=""
+LABEL maintainer="${MAINTAINER}"
 LABEL description="Sub2API - AI API Gateway Platform"
-LABEL org.opencontainers.image.source="https://github.com/Wei-Shaw/sub2api"
+LABEL org.opencontainers.image.source="${OCI_SOURCE}"
 
 # Install runtime dependencies
 RUN apk add --no-cache \

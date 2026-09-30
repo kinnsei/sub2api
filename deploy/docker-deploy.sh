@@ -20,8 +20,11 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-# GitHub raw content base URL
-GITHUB_RAW_URL="https://raw.githubusercontent.com/ranxi2001/sub2api/production/deploy"
+# GitHub raw content base URL.
+# There is no universal default: this must point at the repository and branch
+# that publish the deployment files you intend to use.
+GITHUB_REPO="${SUB2API_GITHUB_REPO:-}"
+GITHUB_REF="${SUB2API_GITHUB_REF:-production}"
 
 # Print colored message
 print_info() {
@@ -39,6 +42,16 @@ print_warning() {
 print_error() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
+
+if [ -z "$GITHUB_REPO" ]; then
+    print_error "SUB2API_GITHUB_REPO is not set. Export it as owner/repo (optionally set SUB2API_GITHUB_REF)."
+    exit 1
+fi
+if [[ ! "$GITHUB_REPO" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]]; then
+    print_error "SUB2API_GITHUB_REPO must be in owner/repo form, got: $GITHUB_REPO"
+    exit 1
+fi
+GITHUB_RAW_URL="https://raw.githubusercontent.com/${GITHUB_REPO}/${GITHUB_REF}/deploy"
 
 # Generate random secret
 generate_secret() {

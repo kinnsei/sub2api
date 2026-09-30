@@ -10,7 +10,7 @@ runtime:
 # Copy this file to /etc/sub2api/config.yaml and modify as needed
 # 复制此文件到 /etc/sub2api/config.yaml 并根据需要修改
 #
-# Documentation / 文档: https://github.com/Wei-Shaw/sub2api
+# Documentation / 文档: 见部署仓库的 README.md 与 docs/ 目录
 
 # =============================================================================
 # Server Configuration
@@ -1258,6 +1258,16 @@ update:
   # Leave empty for direct connection (recommended for overseas servers)
   # 留空表示直连（适用于海外服务器）
   proxy_url: ""
+
+  # Release repository in "owner/repo" form. Used by the admin "check for update"
+  # feature and by the version-matched login runtime download. There is no
+  # universal default: leave it empty unless you publish releases for this
+  # deployment. With an empty value those features report "not configured"
+  # instead of downloading artifacts from an unrelated repository.
+  # 发布仓库，格式为 "owner/repo"。用于后台「检查更新」和按版本安装登录运行时。
+  # 没有通用默认值：除非你为自己的部署发布 Release，否则请留空。
+  # 留空时相关功能会明确报告「未配置」，而不会去下载与本部署无关的产物。
+  repository: ""
 
 # =============================================================================
 # Image Storage (异步图片任务结果对象存储)

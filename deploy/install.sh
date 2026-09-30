@@ -2,7 +2,12 @@
 #
 # Sub2API Installation Script
 # Sub2API 安装脚本
-# Usage: curl -sSL https://raw.githubusercontent.com/ranxi2001/sub2api/production/deploy/install.sh | bash
+# Usage: SUB2API_GITHUB_REPO=owner/repo curl -sSL <your-raw-install-url> | bash
+#
+# This installer downloads release assets from a GitHub repository. There is no
+# universal default, so the repository must be supplied explicitly via the
+# SUB2API_GITHUB_REPO environment variable or the --repo flag, pointing at the
+# deployment that publishes the releases you intend to install.
 #
 
 set -e
@@ -31,7 +36,9 @@ CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
 # Configuration
-GITHUB_REPO="${SUB2API_GITHUB_REPO:-ranxi2001/sub2api}"
+# No default repository: the installer must be told which deployment publishes
+# its releases. Set SUB2API_GITHUB_REPO or pass --repo owner/repo.
+GITHUB_REPO="${SUB2API_GITHUB_REPO:-}"
 INSTALL_DIR="/opt/sub2api"
 SERVICE_NAME="sub2api"
 SERVICE_USER="sub2api"
@@ -78,6 +85,8 @@ declare -A MSG_ZH=(
     ["unsupported_os"]="不支持的操作系统"
     ["missing_deps"]="缺少依赖"
     ["install_deps_first"]="请先安装以下依赖"
+    ["repo_not_configured"]="未指定发布仓库。请设置 SUB2API_GITHUB_REPO=owner/repo，或传入 --repo owner/repo。"
+    ["repo_invalid"]="发布仓库格式无效，应为 owner/repo"
     ["fetching_version"]="正在获取最新版本..."
     ["latest_version"]="最新版本"
     ["failed_get_version"]="获取最新版本失败"
@@ -203,6 +212,8 @@ declare -A MSG_EN=(
     ["unsupported_os"]="Unsupported OS"
     ["missing_deps"]="Missing dependencies"
     ["install_deps_first"]="Please install them first"
+    ["repo_not_configured"]="Release repository not specified. Set SUB2API_GITHUB_REPO=owner/repo or pass --repo owner/repo."
+    ["repo_invalid"]="Invalid release repository; expected owner/repo"
     ["fetching_version"]="Fetching latest version..."
     ["latest_version"]="Latest version"
     ["failed_get_version"]="Failed to get latest version"
@@ -767,7 +778,7 @@ install_service() {
     cat > /etc/systemd/system/sub2api.service << EOF
 [Unit]
 Description=Sub2API - AI API Gateway Platform
-Documentation=https://github.com/Wei-Shaw/sub2api
+Documentation=https://github.com/${GITHUB_REPO}
 After=network.target postgresql.service redis.service
 Wants=postgresql.service redis.service
 
@@ -1095,6 +1106,23 @@ main() {
                 PURGE="true"
                 shift
                 ;;
+            --repo)
+                if [ -n "${2:-}" ] && [[ ! "$2" =~ ^- ]]; then
+                    GITHUB_REPO="$2"
+                    shift 2
+                else
+                    echo "Error: --repo requires an owner/repo argument" >&2
+                    exit 1
+                fi
+                ;;
+            --repo=*)
+                GITHUB_REPO="${1#*=}"
+                if [ -z "$GITHUB_REPO" ]; then
+                    echo "Error: --repo requires an owner/repo argument" >&2
+                    exit 1
+                fi
+                shift
+                ;;
             -v|--version)
                 if [ -n "${2:-}" ] && [[ ! "$2" =~ ^- ]]; then
                     target_version="$2"
@@ -1124,6 +1152,25 @@ main() {
 
     # Select language first
     select_language
+
+    # The release source has no universal default; refuse to guess instead of
+    # downloading releases from an unrelated repository. Commands that never
+    # touch releases (uninstall, help) do not need it.
+    GITHUB_REPO="$(printf '%s' "$GITHUB_REPO" | sed -E 's#^https?://github\.com/##; s#\.git$##; s#^/+##; s#/+$##')"
+    case "${1:-}" in
+        uninstall|remove|--help|-h)
+            ;;
+        *)
+            if [ -z "$GITHUB_REPO" ]; then
+                echo "Error: $(msg 'repo_not_configured')" >&2
+                exit 1
+            fi
+            if [[ ! "$GITHUB_REPO" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]]; then
+                echo "Error: $(msg 'repo_invalid'): $GITHUB_REPO" >&2
+                exit 1
+            fi
+            ;;
+    esac
 
     echo ""
     echo "=============================================="
@@ -1230,11 +1277,12 @@ main() {
             echo ""
             echo "Options:"
             echo "  -v, --version <ver>  $(msg 'opt_version')"
+            echo "  --repo <owner/repo>  Release repository (or set SUB2API_GITHUB_REPO)"
             echo "  -y, --yes            Skip confirmation prompts (for uninstall)"
             echo ""
             echo "Examples:"
-            echo "  $0                        # Install latest version"
-            echo "  $0 install -v v0.1.0      # Install specific version"
+            echo "  SUB2API_GITHUB_REPO=owner/repo $0            # Install latest version"
+            echo "  $0 --repo owner/repo install -v v0.1.0       # Install specific version"
             echo "  $0 upgrade                # Upgrade to latest"
             echo "  $0 upgrade -v v0.2.0      # Upgrade to specific version"
             echo "  $0 rollback v0.1.0        # Rollback to v0.1.0"
