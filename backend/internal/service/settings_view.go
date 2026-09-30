@@ -389,9 +389,14 @@ type PublicSettings struct {
 	APIBaseURL                          string
 	ContactInfo                         string
 	DocURL                              string
-	HomeContent                         string
-	CompactHomeEnabled                  bool
-	HideCcsImportButton                 bool
+	// SourceRepository is the configured "owner/repo" that publishes this
+	// deployment (update.repository), or empty when unconfigured. The web UI
+	// uses it to build documentation/source links so a fork never silently
+	// links visitors to an unrelated upstream repository.
+	SourceRepository    string
+	HomeContent         string
+	CompactHomeEnabled  bool
+	HideCcsImportButton bool
 
 	PurchaseSubscriptionEnabled bool
 	PurchaseSubscriptionURL     string

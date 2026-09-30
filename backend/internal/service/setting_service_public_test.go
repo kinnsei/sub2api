@@ -309,3 +309,46 @@ func TestSettingService_GetPublicSettings_PaymentBalanceDisabledStrictTrue(t *te
 		})
 	}
 }
+
+// The web UI builds documentation and source links from the deployment's
+// configured release repository. It must never fall back to a hardcoded
+// repository, so an unconfigured deployment reports an empty value and the UI
+// hides those links instead of pointing at an unrelated project.
+func TestSettingService_GetPublicSettings_ExposesConfiguredSourceRepository(t *testing.T) {
+	cases := []struct {
+		name string
+		repo string
+		want string
+	}{
+		{name: "unconfigured stays empty", repo: "", want: ""},
+		{name: "whitespace only stays empty", repo: "   ", want: ""},
+		{name: "configured value is exposed", repo: "example-owner/example-repo", want: "example-owner/example-repo"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := NewSettingService(&settingPublicRepoStub{values: map[string]string{}}, &config.Config{
+				Update: config.UpdateConfig{Repository: tc.repo},
+			})
+
+			settings, err := svc.GetPublicSettings(context.Background())
+			require.NoError(t, err)
+			require.Equal(t, tc.want, settings.SourceRepository)
+
+			raw, err := svc.GetPublicSettingsForInjection(context.Background())
+			require.NoError(t, err)
+			payload, ok := raw.(*PublicSettingsInjectionPayload)
+			require.True(t, ok)
+			require.Equal(t, tc.want, payload.SourceRepository)
+		})
+	}
+}
+
+// A nil config must not panic: some tests and tooling construct the service
+// without one, and the link is simply reported as unconfigured.
+func TestSettingService_SourceRepositoryNilConfigIsEmpty(t *testing.T) {
+	svc := NewSettingService(&settingPublicRepoStub{values: map[string]string{}}, nil)
+
+	settings, err := svc.GetPublicSettings(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "", settings.SourceRepository)
+}
