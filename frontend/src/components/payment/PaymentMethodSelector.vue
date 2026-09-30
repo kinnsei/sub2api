@@ -12,16 +12,16 @@
         :key="method.type"
         type="button"
         :title="methodLabel(method)"
-        :disabled="!method.available"
+        :disabled="!method.selectable"
         :class="[
           'relative flex h-[60px] min-w-0 flex-col items-center justify-center rounded-lg border px-3 transition-all',
-          !method.available
+          !method.selectable
             ? 'cursor-not-allowed border-gray-200 bg-gray-50 opacity-50 dark:border-dark-700 dark:bg-dark-800/50'
             : selected === method.type
               ? methodSelectedClass(method.type)
               : 'border-gray-300 bg-white text-gray-700 hover:border-gray-400 dark:border-dark-600 dark:bg-dark-800 dark:text-gray-200 dark:hover:border-dark-500',
         ]"
-        @click="method.available && emit('select', method.type)"
+        @click="method.selectable && emit('select', method.type)"
       >
         <span class="flex w-full min-w-0 items-center justify-center gap-2">
           <img :src="methodIcon(method.type)" :alt="methodLabel(method)" class="h-7 w-7 shrink-0 object-contain" />
@@ -56,7 +56,12 @@ export interface PaymentMethodOption {
   type: string
   display_name?: string
   fee_rate: number
-  available: boolean
+  /**
+   * Whether the current amount fits this method's backend-enforced range.
+   * The backend never reports per-method availability, so the amount range is
+   * the only real constraint the page can enforce.
+   */
+  selectable: boolean
 }
 
 const props = defineProps<{

@@ -535,4 +535,53 @@ describe('PaymentResultView', () => {
     expect(wrapper.text()).toContain('payment.methods.alipay')
     expect(wrapper.text()).not.toContain('payment.methods.alipay_direct')
   })
+
+  describe('refund states', () => {
+    async function mountWithStatus(status: string) {
+      routeState.query = { resume_token: 'resume-refund' }
+      resolveOrderPublicByResumeToken.mockResolvedValue({
+        data: orderFactory(status),
+      })
+
+      const wrapper = mount(PaymentResultView, {
+        global: { stubs: { OrderStatusBadge: true } },
+      })
+      await flushPromises()
+      return wrapper
+    }
+
+    it.each(['REFUNDED', 'PARTIALLY_REFUNDED'])(
+      'reports %s as a refund, never as a payment failure',
+      async (status) => {
+        const wrapper = await mountWithStatus(status)
+
+        expect(wrapper.text()).not.toContain('payment.result.failed')
+        expect(wrapper.text()).not.toContain('payment.result.processing')
+        expect(wrapper.text()).toContain(
+          status === 'PARTIALLY_REFUNDED'
+            ? 'payment.result.partiallyRefunded'
+            : 'payment.result.refunded',
+        )
+        // Refunded orders were credited then debited, so the cached balance is stale.
+        expect(refreshUser).toHaveBeenCalledTimes(1)
+      },
+    )
+
+    it.each(['REFUND_REQUESTED', 'REFUNDING', 'REFUND_PENDING'])(
+      'shows %s as an in-progress refund rather than a failure',
+      async (status) => {
+        const wrapper = await mountWithStatus(status)
+
+        expect(wrapper.text()).not.toContain('payment.result.failed')
+        expect(wrapper.text()).toContain('payment.result.refundProcessing')
+      },
+    )
+
+    it('shows REFUND_FAILED as a neutral refund status, not a payment failure', async () => {
+      const wrapper = await mountWithStatus('REFUND_FAILED')
+
+      expect(wrapper.text()).not.toContain('payment.result.failed')
+      expect(wrapper.text()).toContain('payment.result.refundFailed')
+    })
+  })
 })

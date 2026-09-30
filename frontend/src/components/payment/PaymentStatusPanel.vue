@@ -445,7 +445,9 @@ async function pollStatus() {
 
 function startCountdown(seconds: number) {
   remainingSeconds.value = Math.max(0, seconds)
-  if (remainingSeconds.value <= 0) { setOutcome('expired'); return }
+  // Already expired: tear down whatever timers are live (the poll interval is
+  // created before this call) instead of leaving them running.
+  if (remainingSeconds.value <= 0) { setOutcome('expired'); cleanup(); return }
   countdownTimer = setInterval(() => {
     remainingSeconds.value--
     if (remainingSeconds.value <= 0) { setOutcome('expired'); cleanup() }
@@ -475,16 +477,18 @@ function cleanup() {
   alipayLauncher = null
 }
 
-// Initialize on mount
+// Initialize on mount.
 qrUrl.value = props.qrCode
 verifyAttempts = 0
 lastVerifyAt = 0
+// The poll timer is installed BEFORE the countdown so that an already-expired
+// order (startCountdown -> cleanup()) tears the poll timer down as well.
+pollTimer = setInterval(pollStatus, 3000)
 let seconds = 30 * 60
 if (props.expiresAt) {
   seconds = Math.floor((new Date(props.expiresAt).getTime() - Date.now()) / 1000)
 }
 startCountdown(seconds)
-pollTimer = setInterval(pollStatus, 3000)
 renderQR()
 
 watch([() => qrUrl.value, showQRCode], () => renderQR())

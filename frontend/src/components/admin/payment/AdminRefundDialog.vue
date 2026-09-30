@@ -109,6 +109,12 @@
         <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
           {{ t('payment.admin.maxRefundable') }}: {{ creditedAmountSymbol }}{{ maxRefundable.toFixed(2) }}
         </p>
+        <p v-if="amountExceedsRemaining" class="mt-1 text-xs text-red-600 dark:text-red-400">
+          {{ t('payment.admin.refundAmountExceedsRemaining', { max: `${creditedAmountSymbol}${maxRefundable.toFixed(2)}` }) }}
+        </p>
+        <p v-else-if="amountExceedsOrderAmount" class="mt-1 text-xs text-amber-600 dark:text-amber-400">
+          {{ t('payment.errors.REFUND_AMOUNT_EXCEEDED') }}
+        </p>
       </div>
 
       <!-- Reason -->
@@ -153,7 +159,7 @@
         <button
           type="submit"
           form="refund-form"
-          :disabled="submitting || form.amount <= 0 || (requireForce && !form.force)"
+          :disabled="submitting || form.amount <= 0 || amountInvalid || (requireForce && !form.force)"
           class="rounded-md bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-2 disabled:opacity-50 dark:focus:ring-offset-dark-800"
         >
           {{ submitting ? t('common.processing') : t('payment.admin.confirmRefund') }}
@@ -198,19 +204,41 @@ const form = reactive({
   force: false,
 })
 
-// In REFUND_REQUESTED / REFUND_PENDING status, refund_amount is requested/pending, not actually refunded.
-// Only PARTIALLY_REFUNDED / REFUNDED have real refund amounts.
+/**
+ * Best-effort amount already refunded.
+ *
+ * The backend budget is `order.amount - SUM(successful refunds)`
+ * (see backend/internal/service/payment_refund.go PrepareRefund). The admin DTO
+ * exposes only `refund_amount`, which is written with the *requested* amount
+ * while a refund is in flight, so it is not a reliable running total. We use it
+ * only where its meaning is unambiguous and otherwise fall back to the whole
+ * order amount. The inline validation and the backend's own
+ * REFUND_AMOUNT_EXCEEDED response are what actually guarantee correctness.
+ */
 const actuallyRefunded = computed(() => {
   if (!props.order) return 0
   const s = props.order.status
-  if (s === 'PARTIALLY_REFUNDED' || s === 'REFUNDED') return props.order.refund_amount || 0
+  // REFUNDED means the whole order was given back, so nothing remains refundable.
+  if (s === 'REFUNDED') return props.order.amount
+  // PARTIALLY_REFUNDED carries the amount of the refund that completed.
+  if (s === 'PARTIALLY_REFUNDED') return props.order.refund_amount || 0
+  // REFUND_REQUESTED / REFUND_PENDING store a requested or in-flight amount,
+  // which is not money that has actually left the account yet.
   return 0
 })
 
 const maxRefundable = computed(() => {
   if (!props.order) return 0
-  return props.order.amount - actuallyRefunded.value
+  return Math.max(0, props.order.amount - actuallyRefunded.value)
 })
+
+// Hard cap: the backend rejects any amount above the order total.
+const amountExceedsOrderAmount = computed(() => !!props.order && form.amount > props.order.amount)
+// Soft cap: the amount is within the order total but above what is still refundable.
+const amountExceedsRemaining = computed(() =>
+  !amountExceedsOrderAmount.value && form.amount > maxRefundable.value
+)
+const amountInvalid = computed(() => amountExceedsOrderAmount.value || amountExceedsRemaining.value)
 
 const balanceInsufficient = computed(() => {
   if (props.userBalance == null || !props.order) return false
@@ -236,7 +264,8 @@ function formatDateTime(dateStr: string): string {
 }
 
 function handleSubmit() {
-  if (form.amount <= 0 || form.amount > maxRefundable.value) return
+  // Inline messages above explain an over-cap amount; never submit silently.
+  if (form.amount <= 0 || amountInvalid.value) return
   if (props.requireForce && !form.force) return
   emit('confirm', { ...form })
 }

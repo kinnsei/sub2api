@@ -19,6 +19,27 @@ export type OrderStatus =
   | 'REFUNDED'
   | 'REFUND_FAILED'
 
+/**
+ * Runtime counterpart of the `OrderStatus` union, in display order.
+ * Filters and any other full-status enumeration must derive from this list so
+ * adding a status to the union cannot silently omit it from the UI.
+ */
+export const ORDER_STATUSES = [
+  'PENDING',
+  'PAID',
+  'RECHARGING',
+  'COMPLETED',
+  'EXPIRED',
+  'CANCELLED',
+  'FAILED',
+  'REFUND_REQUESTED',
+  'REFUNDING',
+  'REFUND_PENDING',
+  'PARTIALLY_REFUNDED',
+  'REFUNDED',
+  'REFUND_FAILED',
+] as const satisfies readonly OrderStatus[]
+
 export type PaymentType = 'alipay' | 'wxpay' | 'alipay_direct' | 'wxpay_direct' | 'stripe' | 'easypay' | 'airwallex'
 
 export type OrderType = 'balance' | 'subscription'
@@ -41,16 +62,19 @@ export interface PaymentConfig {
   stripe_publishable_key: string
 }
 
+/**
+ * Per-method limits as returned by /payment/limits and /payment/checkout-info.
+ * Only fields the backend actually sends are declared: `MethodLimits` in
+ * backend/internal/service/payment_config_service.go has no availability or
+ * daily-usage counters, so selectable methods are decided by the amount range.
+ */
 export interface MethodLimit {
   currency?: string
   display_name?: string
   daily_limit: number
-  daily_used: number
-  daily_remaining: number
   single_min: number
   single_max: number
   fee_rate: number
-  available: boolean
 }
 
 /** Response from /payment/limits API */
@@ -106,7 +130,7 @@ export interface PaymentOrder {
   provider_instance_id?: string
 }
 
-// ==================== Plans & Channels ====================
+// ==================== Subscription Plans ====================
 
 export interface SubscriptionPlan {
   id: number
@@ -134,18 +158,6 @@ export interface SubscriptionPlan {
   features: string[]
   for_sale: boolean
   sort_order: number
-}
-
-export interface PaymentChannel {
-  id: number
-  group_id?: number
-  name: string
-  platform: string
-  rate_multiplier: number
-  description: string
-  models: string[]
-  features: string[]
-  enabled: boolean
 }
 
 // ==================== Providers ====================

@@ -73,6 +73,39 @@ describe('PaymentStatusPanel', () => {
     vi.useRealTimers()
   })
 
+  it('does not leave a poll timer running when the order is already expired on mount', async () => {
+    const wrapper = mount(PaymentStatusPanel, {
+      props: {
+        orderId: 42,
+        qrCode: 'https://pay.example.com/qr/42',
+        // Already in the past: startCountdown takes the "expired" branch.
+        expiresAt: '2000-01-01T00:00:00Z',
+        paymentType: 'alipay',
+        orderType: 'balance',
+      },
+      global: {
+        stubs: {
+          Icon: true,
+        },
+      },
+    })
+
+    await flushPromises()
+    expect(wrapper.text()).toContain('payment.qr.expired')
+
+    // The interval itself must be gone. `pollStatus` also bails out early once an
+    // outcome is set, so asserting it was not called would not catch the leak.
+    expect(vi.getTimerCount()).toBe(0)
+
+    await vi.advanceTimersByTimeAsync(10_000)
+    await flushPromises()
+
+    expect(pollOrderStatus).not.toHaveBeenCalled()
+    expect(vi.getTimerCount()).toBe(0)
+
+    wrapper.unmount()
+  })
+
   it('treats RECHARGING as a successful terminal state', async () => {
     pollOrderStatus.mockResolvedValue(orderFactory('RECHARGING'))
 

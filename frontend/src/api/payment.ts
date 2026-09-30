@@ -79,9 +79,21 @@ export const paymentAPI = {
     return apiClient.post<PublicOrderVerifyResult>('/payment/public/orders/resolve', { resume_token: resumeToken })
   },
 
-  /** Request a refund for a completed order */
+  /**
+   * Request a refund for a completed order.
+   *
+   * The backend requires an Idempotency-Key, so one is minted per submit. A
+   * user-initiated refund request has no automatic retry path (the button is
+   * disabled while in flight), so a per-call key is the correct lifetime here:
+   * a genuine second request after the first was acknowledged is a new intent
+   * and must not be deduplicated against the first.
+   */
   requestRefund(id: number, data: { reason: string }) {
-    return apiClient.post(`/payment/orders/${id}/refund-request`, data)
+    const idempotencyKey =
+      globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`
+    return apiClient.post(`/payment/orders/${id}/refund-request`, data, {
+      headers: { 'Idempotency-Key': idempotencyKey }
+    })
   },
 
   /** Get provider instance IDs that allow user refund */

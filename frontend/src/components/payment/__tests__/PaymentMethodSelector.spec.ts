@@ -14,7 +14,7 @@ describe('PaymentMethodSelector', () => {
       type: `custom_${index}`,
       display_name: `CUSTOM_PAYMENT_METHOD_${index}`,
       fee_rate: 0,
-      available: true,
+      selectable: true,
     }))
 
     const wrapper = mount(PaymentMethodSelector, {
@@ -39,7 +39,7 @@ describe('PaymentMethodSelector', () => {
     const wrapper = mount(PaymentMethodSelector, {
       props: {
         selected: 'ldc',
-        methods: [{ type: 'ldc', display_name: 'LDC Pay', fee_rate: 0, available: true }],
+        methods: [{ type: 'ldc', display_name: 'LDC Pay', fee_rate: 0, selectable: true }],
       },
     })
 
@@ -52,12 +52,39 @@ describe('PaymentMethodSelector', () => {
     const wrapper = mount(PaymentMethodSelector, {
       props: {
         selected: 'card_alipay',
-        methods: [{ type: 'card_alipay', display_name: 'Card Pay', fee_rate: 0, available: true }],
+        methods: [{ type: 'card_alipay', display_name: 'Card Pay', fee_rate: 0, selectable: true }],
       },
     })
 
     const button = wrapper.get('button')
     expect(button.classes()).toContain('border-primary-500')
     expect(button.classes()).not.toContain('border-[#02A9F1]')
+  })
+
+  it('keeps a method selectable when the backend only reports amount limits', () => {
+    const wrapper = mount(PaymentMethodSelector, {
+      props: {
+        selected: 'wxpay',
+        methods: [{ type: 'wxpay', display_name: 'WeChat Pay', fee_rate: 0, selectable: true }],
+      },
+    })
+
+    const button = wrapper.get('button')
+    expect(button.attributes('disabled')).toBeUndefined()
+  })
+
+  it('disables a method whose amount range rejects the current amount', async () => {
+    const wrapper = mount(PaymentMethodSelector, {
+      props: {
+        selected: 'wxpay',
+        methods: [{ type: 'wxpay', display_name: 'WeChat Pay', fee_rate: 0, selectable: false }],
+      },
+    })
+
+    const button = wrapper.get('button')
+    expect(button.attributes('disabled')).toBeDefined()
+
+    await button.trigger('click')
+    expect(wrapper.emitted('select')).toBeUndefined()
   })
 })

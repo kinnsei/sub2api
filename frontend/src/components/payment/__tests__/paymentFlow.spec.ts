@@ -11,12 +11,9 @@ import {
 function methodLimit(overrides: Partial<MethodLimit> = {}): MethodLimit {
   return {
     daily_limit: 0,
-    daily_used: 0,
-    daily_remaining: 0,
     single_min: 0,
     single_max: 0,
     fee_rate: 0,
-    available: true,
     ...overrides,
   }
 }

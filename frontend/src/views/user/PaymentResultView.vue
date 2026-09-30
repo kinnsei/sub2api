@@ -8,16 +8,22 @@
       <template v-else>
         <!-- Status Icon -->
         <div class="text-center">
-          <div v-if="isSuccess"
+          <div v-if="showsSuccessIcon"
             class="mx-auto flex h-20 w-20 items-center justify-center rounded-full bg-green-100 dark:bg-green-900/30">
             <svg class="h-10 w-10 text-green-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"
               stroke-width="2">
               <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7" />
             </svg>
           </div>
-          <div v-else-if="isPending"
+          <div v-else-if="showsProcessingIcon"
             class="mx-auto flex h-20 w-20 items-center justify-center rounded-full bg-yellow-100 dark:bg-yellow-900/30">
             <div class="h-10 w-10 animate-spin rounded-full border-4 border-yellow-500 border-t-transparent"></div>
+          </div>
+          <div v-else-if="showsNeutralIcon"
+            class="mx-auto flex h-20 w-20 items-center justify-center rounded-full bg-gray-100 dark:bg-dark-700">
+            <svg class="h-10 w-10 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
+            </svg>
           </div>
           <div v-else
             class="mx-auto flex h-20 w-20 items-center justify-center rounded-full bg-red-100 dark:bg-red-900/30">
@@ -30,6 +36,9 @@
           </h2>
           <p v-if="isPending" class="mt-2 text-sm text-gray-500 dark:text-gray-400">
             {{ t('payment.result.processingHint') }}
+          </p>
+          <p v-else-if="isRefundInProgress" class="mt-2 text-sm text-gray-500 dark:text-gray-400">
+            {{ t('payment.result.refundProcessingHint') }}
           </p>
         </div>
         <!-- Order Info -->
@@ -137,6 +146,15 @@ const returnInfo = ref<ReturnInfo | null>(null)
 
 const SUCCESS_STATUSES = new Set(['COMPLETED', 'PAID', 'RECHARGING'])
 const PENDING_STATUSES = new Set(['PENDING', 'CREATED', 'WAITING', 'PROCESSING'])
+// A refunded order was paid and then deliberately given back. It is not a
+// failure, so it must not fall through to the red "payment failed" branch.
+const REFUNDED_STATUSES = new Set(['REFUNDED', 'PARTIALLY_REFUNDED'])
+// Refunds still being processed upstream: the outcome is not final yet.
+const REFUND_PENDING_STATUSES = new Set(['REFUND_REQUESTED', 'REFUNDING', 'REFUND_PENDING'])
+// The refund itself failed; the money was still originally paid.
+const REFUND_FAILED_STATUSES = new Set(['REFUND_FAILED'])
+/** Statuses that imply the balance was credited, so the profile must be refreshed. */
+const BALANCE_CREDITED_STATUSES = new Set(['COMPLETED', ...REFUNDED_STATUSES, ...REFUND_PENDING_STATUSES])
 const STATUS_REFRESH_INTERVAL_MS = 2000
 const STATUS_REFRESH_MAX_ATTEMPTS = 15
 
@@ -177,9 +195,39 @@ const isPending = computed(() => {
   return isPendingStatus(order.value?.status)
 })
 
+const isRefunded = computed(() => {
+  return REFUNDED_STATUSES.has(normalizeOrderStatus(order.value?.status))
+})
+
+const isRefundInProgress = computed(() => {
+  return REFUND_PENDING_STATUSES.has(normalizeOrderStatus(order.value?.status))
+})
+
+const isRefundFailed = computed(() => {
+  return REFUND_FAILED_STATUSES.has(normalizeOrderStatus(order.value?.status))
+})
+
+// Refund states are never rendered as a payment failure: the icons follow the
+// same grouping the title does. A failed refund gets the neutral grey cross
+// because the payment succeeded but the money stayed with the merchant.
+const showsSuccessIcon = computed(() => isSuccess.value || isRefunded.value)
+const showsProcessingIcon = computed(() => isPending.value || isRefundInProgress.value)
+const showsNeutralIcon = computed(() => isRefundFailed.value)
+
 const statusTitle = computed(() => {
   if (isSuccess.value) {
     return t('payment.result.success')
+  }
+  if (isRefunded.value) {
+    return order.value && normalizeOrderStatus(order.value.status) === 'PARTIALLY_REFUNDED'
+      ? t('payment.result.partiallyRefunded')
+      : t('payment.result.refunded')
+  }
+  if (isRefundInProgress.value) {
+    return t('payment.result.refundProcessing')
+  }
+  if (isRefundFailed.value) {
+    return t('payment.result.refundFailed')
   }
   if (isPending.value) {
     return t('payment.result.processing')
@@ -204,7 +252,9 @@ function setResolvedOrder(nextOrder: ResolvedOrder | null): void {
 }
 
 function refreshUserBalanceForSuccessfulOrder(nextOrder: ResolvedOrder | null): void {
-  if (!nextOrder || userBalanceRefreshStarted || normalizeOrderStatus(nextOrder.status) !== 'COMPLETED') {
+  // Refunded orders were credited first, then debited again, so the cached
+  // balance is stale for them too — refresh in both cases.
+  if (!nextOrder || userBalanceRefreshStarted || !BALANCE_CREDITED_STATUSES.has(normalizeOrderStatus(nextOrder.status))) {
     return
   }
   if ('order_type' in nextOrder && nextOrder.order_type !== 'balance') {

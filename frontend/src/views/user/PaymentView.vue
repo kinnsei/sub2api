@@ -638,7 +638,7 @@ const methodOptions = computed<PaymentMethodOption[]>(() =>
       type,
       display_name: ml?.display_name,
       fee_rate: ml?.fee_rate ?? 0,
-      available: ml?.available !== false && amountFitsMethod(validAmount.value, type),
+      selectable: amountFitsMethod(validAmount.value, type),
     }
   })
 )
@@ -673,7 +673,6 @@ const amountError = computed(() => {
 const canSubmit = computed(() =>
   validAmount.value > 0
     && amountFitsMethod(validAmount.value, selectedMethod.value)
-    && selectedLimit.value?.available !== false
 )
 
 const subPaymentAmount = computed(() => {
@@ -708,7 +707,7 @@ const subMethodOptions = computed<PaymentMethodOption[]>(() => {
       type,
       display_name: ml?.display_name,
       fee_rate: ml?.fee_rate ?? 0,
-      available: ml?.available !== false && amountFitsMethod(subscriptionTotalAmountForCurrency(price, currency), type),
+      selectable: amountFitsMethod(subscriptionTotalAmountForCurrency(price, currency), type),
     }
   })
 })
@@ -716,7 +715,6 @@ const subMethodOptions = computed<PaymentMethodOption[]>(() => {
 const canSubmitSubscription = computed(() =>
   selectedPlan.value !== null
     && amountFitsMethod(subTotalAmount.value, selectedMethod.value)
-    && selectedLimit.value?.available !== false
 )
 
 // Auto-switch to first available method when current selection can't handle the amount

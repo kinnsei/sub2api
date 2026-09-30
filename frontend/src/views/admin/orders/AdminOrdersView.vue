@@ -30,7 +30,8 @@
               <Icon name="x" size="sm" />
               {{ t('payment.orders.cancel') }}
             </button>
-            <button v-if="row.status === 'FAILED'" @click="handleRetryOrder(row)" class="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium text-blue-600 hover:bg-blue-50 dark:text-blue-400 dark:hover:bg-blue-900/20">
+            <!-- Retry fulfillment: the backend accepts FAILED, PAID and recoverable RECHARGING orders. -->
+            <button v-if="canRetryFulfillment(row)" @click="handleRetryOrder(row)" class="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium text-blue-600 hover:bg-blue-50 dark:text-blue-400 dark:hover:bg-blue-900/20">
               <Icon name="refresh" size="sm" />
               {{ t('payment.admin.retry') }}
             </button>
@@ -123,6 +124,7 @@ import { adminPaymentAPI } from '@/api/admin/payment'
 import { extractI18nErrorMessage } from '@/utils/apiError'
 import { formatOrderDateTime } from '@/components/payment/orderUtils'
 import type { PaymentOrder } from '@/types/payment'
+import { ORDER_STATUSES } from '@/types/payment'
 import AppLayout from '@/components/layout/AppLayout.vue'
 import Pagination from '@/components/common/Pagination.vue'
 import BaseDialog from '@/components/common/BaseDialog.vue'
@@ -155,6 +157,11 @@ const showRefundDialog = ref(false)
 const refundSubmitting = ref(false)
 const refundRequireForce = ref(false)
 const refundWarning = ref('')
+// Idempotency key for the refund intent currently being submitted, plus the
+// fingerprint of the payload it was minted for (see currentRefundIdempotencyKey).
+const refundIdempotencyKey = ref('')
+const refundIdempotencyPayload = ref('')
+const refundIdempotencyKeyDirty = ref(false)
 const refundQueryingIds = ref(new Set<number>())
 const orderAuditLogs = ref<AuditLog[]>([])
 const creditedAmountSymbol = currencySymbol('USD')
@@ -187,18 +194,22 @@ async function loadOrders() {
 function handleOrderPageChange(page: number) { orderPagination.page = page; loadOrders() }
 function handleOrderPageSizeChange(size: number) { orderPagination.page_size = size; orderPagination.page = 1; loadOrders() }
 
+// RetryFulfillment accepts FAILED, PAID and recoverable RECHARGING orders
+// (see backend/internal/service/payment_fulfillment.go RetryFulfillment).
+const RETRYABLE_FULFILLMENT_STATUSES = new Set<string>(['FAILED', 'PAID', 'RECHARGING'])
+
+function canRetryFulfillment(order: PaymentOrder): boolean {
+  return RETRYABLE_FULFILLMENT_STATUSES.has(order.status)
+}
+
+// Canonical order status list lives in '@/types/payment' — derive the filter
+// from it so a new status can never be missing from the dropdown.
 const statusFilterOptions = computed(() => [
   { value: '', label: t('payment.admin.allStatuses') },
-  { value: 'PENDING', label: t('payment.status.pending') },
-  { value: 'PAID', label: t('payment.status.paid') },
-  { value: 'COMPLETED', label: t('payment.status.completed') },
-  { value: 'EXPIRED', label: t('payment.status.expired') },
-  { value: 'CANCELLED', label: t('payment.status.cancelled') },
-  { value: 'FAILED', label: t('payment.status.failed') },
-  { value: 'REFUNDED', label: t('payment.status.refunded') },
-  { value: 'REFUND_REQUESTED', label: t('payment.status.refund_requested') },
-  { value: 'REFUND_PENDING', label: t('payment.status.refund_pending') },
-  { value: 'REFUND_FAILED', label: t('payment.status.refund_failed') },
+  ...ORDER_STATUSES.map((status) => ({
+    value: status,
+    label: t(`payment.status.${status.toLowerCase()}`),
+  })),
 ])
 
 const paymentTypeFilterOptions = computed(() => [
@@ -241,6 +252,16 @@ function openRefundDialog(order: PaymentOrder) {
   selectedOrder.value = order
   refundRequireForce.value = false
   refundWarning.value = ''
+  // One refund intent gets one idempotency key, minted when the dialog opens.
+  // It stays stable across the retries of that intent (double-click, timeout
+  // retry, or re-submitting after the backend asks for an explicit force
+  // confirmation) so the backend can replay the first result instead of paying
+  // the gateway again — while a later, separate refund from a fresh dialog
+  // still gets its own key, so two legitimate identical partial refunds are
+  // never collapsed into one.
+  refundIdempotencyKey.value = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`
+  // A force retry changes the payload, so it must be a new intent as well.
+  refundIdempotencyKeyDirty.value = false
   showRefundDialog.value = true
 }
 
@@ -248,6 +269,25 @@ function closeRefundDialog() {
   showRefundDialog.value = false
   refundRequireForce.value = false
   refundWarning.value = ''
+  refundIdempotencyKey.value = ''
+  refundIdempotencyKeyDirty.value = false
+}
+
+// Return the idempotency key for the current refund intent. The payload
+// fingerprint is folded in because the backend rejects a reused key with a
+// different payload (IDEMPOTENCY_KEY_CONFLICT); when the admin changes the
+// amount/reason/force after a failure, that is a new intent and must not be
+// deduplicated against the earlier one.
+function currentRefundIdempotencyKey(payload: unknown): string {
+  const fingerprint = JSON.stringify(payload)
+  if (refundIdempotencyKeyDirty.value && refundIdempotencyPayload.value !== fingerprint) {
+    refundIdempotencyKey.value = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`
+  }
+  refundIdempotencyPayload.value = fingerprint
+  // The first submission of an intent is the one the key was minted for; any
+  // later submission of the same payload is a retry and must reuse it.
+  refundIdempotencyKeyDirty.value = true
+  return refundIdempotencyKey.value
 }
 
 function isRefundPendingWarning(warning: string | undefined): boolean {
@@ -258,7 +298,8 @@ async function handleRefund(data: { amount: number; reason: string; deduct_balan
   if (!selectedOrder.value) return
   refundSubmitting.value = true
   try {
-    const res = await adminPaymentAPI.refundOrder(selectedOrder.value.id, { amount: data.amount, reason: data.reason, deduct_balance: data.deduct_balance, force: data.force })
+    const payload = { amount: data.amount, reason: data.reason, deduct_balance: data.deduct_balance, force: data.force }
+    const res = await adminPaymentAPI.refundOrder(selectedOrder.value.id, payload, currentRefundIdempotencyKey(payload))
     if (res.data.success) {
       appStore.showSuccess(t('payment.admin.refundSuccess'))
       closeRefundDialog()

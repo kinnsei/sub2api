@@ -26,6 +26,11 @@
     <template #cell-payment_type="{ value }">
       <span class="text-sm text-gray-700 dark:text-gray-300">{{ t('payment.methods.' + value, value) }}</span>
     </template>
+    <template #cell-order_type="{ value }">
+      <span class="inline-flex items-center rounded-full bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-700 dark:bg-dark-700 dark:text-gray-300">
+        {{ orderTypeLabel(value) }}
+      </span>
+    </template>
     <template #cell-status="{ value }">
       <OrderStatusBadge :status="value" />
     </template>
@@ -57,6 +62,13 @@ const props = defineProps<{
 
 function formatDate(dateStr: string) { return new Date(dateStr).toLocaleString() }
 
+/** Order type drives which actions are available (e.g. refunds are balance-only). */
+function orderTypeLabel(orderType: string): string {
+  if (orderType === 'balance') return t('payment.admin.balanceOrder')
+  if (orderType === 'subscription') return t('payment.admin.subscriptionOrder')
+  return orderType
+}
+
 const creditedAmountSymbol = currencySymbol('USD')
 
 function paymentAmountSymbol(order: PaymentOrder): string {
@@ -74,6 +86,7 @@ const columns = computed((): Column[] => {
   cols.push(
     { key: 'pay_amount', label: t('payment.orders.payAmount') },
     { key: 'payment_type', label: t('payment.orders.paymentMethod') },
+    { key: 'order_type', label: t('payment.admin.orderType') },
     { key: 'status', label: t('payment.orders.status') },
     { key: 'created_at', label: t('payment.orders.createdAt') },
     { key: 'actions', label: t('common.actions') },

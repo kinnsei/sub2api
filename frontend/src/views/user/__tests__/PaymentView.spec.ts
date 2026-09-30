@@ -4,6 +4,7 @@ import PaymentView from '../PaymentView.vue'
 import { PAYMENT_RECOVERY_STORAGE_KEY } from '@/components/payment/paymentFlow'
 import { formatPaymentAmount } from '@/components/payment/currency'
 import AmountInput from '@/components/payment/AmountInput.vue'
+import PaymentMethodSelector from '@/components/payment/PaymentMethodSelector.vue'
 import SubscriptionPlanCard from '@/components/payment/SubscriptionPlanCard.vue'
 import en from '@/i18n/locales/en'
 import zh from '@/i18n/locales/zh'
@@ -109,12 +110,9 @@ vi.mock('@/utils/device', () => ({
 function checkoutInfoFixture(overrides: Partial<CheckoutInfoResponse> = {}) {
   const wxpayMethod: MethodLimit = {
     daily_limit: 0,
-    daily_used: 0,
-    daily_remaining: 0,
     single_min: 0,
     single_max: 0,
     fee_rate: 0,
-    available: true,
   }
   const data: CheckoutInfoResponse = {
     methods: {
@@ -411,6 +409,73 @@ describe('PaymentView recharge rate preview', () => {
   })
 })
 
+describe('PaymentView method availability', () => {
+  it('keeps a method selectable when the backend reports no availability flag', async () => {
+    routeState.path = '/purchase'
+    routeState.query = {}
+    getCheckoutInfo.mockReset().mockResolvedValue(checkoutInfoFixture({
+      methods: {
+        wxpay: {
+          daily_limit: 0,
+          single_min: 1,
+          single_max: 1000,
+          fee_rate: 0,
+        },
+      },
+    }))
+
+    const wrapper = shallowMount(PaymentView, {
+      global: {
+        stubs: {
+          AppLayout: { template: '<div><slot /></div>' },
+          Teleport: true,
+          Transition: false,
+        },
+      },
+    })
+    await flushPromises()
+
+    const selector = wrapper.getComponent(PaymentMethodSelector)
+    expect(selector.props('methods')).toEqual([
+      expect.objectContaining({ type: 'wxpay', selectable: true }),
+    ])
+  })
+
+  it('marks a method unselectable when the amount is outside its range', async () => {
+    routeState.path = '/purchase'
+    routeState.query = {}
+    getCheckoutInfo.mockReset().mockResolvedValue(checkoutInfoFixture({
+      methods: {
+        wxpay: {
+          daily_limit: 0,
+          single_min: 100,
+          single_max: 1000,
+          fee_rate: 0,
+        },
+      },
+    }))
+
+    const wrapper = shallowMount(PaymentView, {
+      global: {
+        stubs: {
+          AppLayout: { template: '<div><slot /></div>' },
+          Teleport: true,
+          Transition: false,
+        },
+      },
+    })
+    await flushPromises()
+
+    wrapper.getComponent(AmountInput).vm.$emit('update:modelValue', 10)
+    await flushPromises()
+
+    const selector = wrapper.getComponent(PaymentMethodSelector)
+    expect(selector.props('methods')).toEqual([
+      expect.objectContaining({ type: 'wxpay', selectable: false }),
+    ])
+  })
+})
+
 describe('PaymentView subscription confirmation amounts', () => {
   it('shows converted CNY pay amount using the subscription rate, not the balance multiplier', async () => {
     const wrapper = await mountSubscriptionConfirm({
@@ -526,12 +591,9 @@ describe('PaymentView payment recovery', () => {
         wxpay: checkoutInfoFixture().data.methods.wxpay,
         ldc: {
           daily_limit: 0,
-          daily_used: 0,
-          daily_remaining: 0,
           single_min: 0,
           single_max: 0,
           fee_rate: 0,
-          available: true,
           display_name: 'LDC Pay',
         },
       },
