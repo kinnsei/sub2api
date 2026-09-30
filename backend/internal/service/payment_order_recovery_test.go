@@ -312,15 +312,15 @@ func TestRetryStuckFulfillmentsStopsAfterAttemptBudget(t *testing.T) {
 		Save(ctx)
 	require.NoError(t, err)
 
-	for i := 0; i < paymentFulfillmentMaxAutoAttempts; i++ {
-		_, err := client.PaymentAuditLog.Create().
-			SetOrderID(strconv.FormatInt(order.ID, 10)).
-			SetAction("FULFILLMENT_FAILED").
-			SetOperator("system").
-			SetDetail(`{"reason":"boom"}`).
-			Save(ctx)
-		require.NoError(t, err)
-	}
+	// The retry budget is a persisted counter, not a count of FULFILLMENT_FAILED
+	// audit rows: payment_audit_logs is capped at one row per (order_id, action) by
+	// a unique index, so an audit-based count could never reach the budget and the
+	// order would be retried forever. This test used to insert 5 audit rows, which
+	// the production schema makes impossible.
+	_, err = client.PaymentOrder.UpdateOneID(order.ID).
+		SetFulfillmentAttempts(paymentFulfillmentMaxAutoAttempts).
+		Save(ctx)
+	require.NoError(t, err)
 
 	svc, _, redeemRepo := newPaymentRecoveryTestService(t, client, nil)
 	redeemRepo.codesByCode[order.RechargeCode] = &RedeemCode{
@@ -344,4 +344,61 @@ func TestRetryStuckFulfillmentsStopsAfterAttemptBudget(t *testing.T) {
 	reloaded, err := client.PaymentOrder.Get(ctx, order.ID)
 	require.NoError(t, err)
 	require.Equal(t, OrderStatusFailed, reloaded.Status)
+}
+
+// TestFulfillmentRetryBudgetIsReachableUnderProductionAuditConstraint is the
+// regression test for the infinite-retry defect.
+//
+// The retry budget used to be derived from the number of FULFILLMENT_FAILED audit
+// rows. payment_audit_logs has a unique index on (order_id, action) (migration 131),
+// so at most one such row can exist and the count could never reach the budget of
+// paymentFulfillmentMaxAutoAttempts. A permanently failing order was therefore
+// retried on every sweep forever.
+//
+// This test drives the real failure path (markFailed over the lease) the maximum
+// number of times and asserts the order is subsequently excluded from the sweep.
+func TestFulfillmentRetryBudgetIsReachableUnderProductionAuditConstraint(t *testing.T) {
+	ctx := context.Background()
+	client := newPaymentOrderLifecycleTestClient(t)
+	user := newPaymentRecoveryTestUser(t, ctx, client, "budget-reachable")
+
+	order, err := newPaymentRecoveryTestOrder(client, user, "budget_reachable", payment.TypeAlipay, OrderStatusRecharging).
+		SetPaymentTradeNo("alipay-budget-reachable-trade").
+		SetPaidAt(time.Now().Add(-time.Hour)).
+		SetUpdatedAt(time.Now().Add(-time.Hour)).
+		Save(ctx)
+	require.NoError(t, err)
+
+	svc := &PaymentService{entClient: client}
+
+	// Drive the real markFailed path once per attempt budget. Each call consumes one
+	// attempt via the lease-conditional update.
+	for i := 0; i < paymentFulfillmentMaxAutoAttempts; i++ {
+		current, err := client.PaymentOrder.Get(ctx, order.ID)
+		require.NoError(t, err)
+		lease := &paymentFulfillmentLease{version: current.UpdatedAt}
+		// markFailed only applies while the order is RECHARGING at the lease version.
+		_, err = client.PaymentOrder.UpdateOneID(order.ID).
+			SetStatus(OrderStatusRecharging).
+			SetUpdatedAt(current.UpdatedAt).
+			Save(ctx)
+		require.NoError(t, err)
+
+		svc.markFailed(ctx, order.ID, lease, errors.New("boom"))
+
+		reloaded, err := client.PaymentOrder.Get(ctx, order.ID)
+		require.NoError(t, err)
+		require.Equal(t, i+1, reloaded.FulfillmentAttempts, "each real failure must consume exactly one attempt")
+	}
+
+	// At most one audit row can exist despite 5 failures — this is the constraint
+	// that broke the old audit-counting implementation.
+	failAudits, err := client.PaymentAuditLog.Query().
+		Where(paymentauditlog.OrderIDEQ(strconv.FormatInt(order.ID, 10)), paymentauditlog.ActionEQ("FULFILLMENT_FAILED")).
+		Count(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 1, failAudits, "the audit index caps FULFILLMENT_FAILED at one row")
+
+	require.Equal(t, paymentFulfillmentMaxAutoAttempts, svc.fulfillmentFailureCount(ctx, order.ID),
+		"the budget must be reachable; an audit-based count would be stuck at 1")
 }

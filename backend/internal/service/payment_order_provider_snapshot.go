@@ -140,10 +140,22 @@ func validateProviderSnapshotMetadata(order *dbent.PaymentOrder, providerKey str
 	case payment.TypeWxpay:
 		if expected := strings.TrimSpace(snapshot.MerchantAppID); expected != "" {
 			actual := strings.TrimSpace(metadata["appid"])
-			if actual == "" {
+			// wxpayMetadataMPAppID: a wxpay instance may configure a dedicated MP
+			// AppID (mpAppId) that JSAPI transactions settle under. The snapshot
+			// records whichever AppID the order actually used, so a JSAPI order
+			// snapshots mpAppId while the provider identity reports the base
+			// merchant AppID in "appid". Accept the MP AppID as an alternative
+			// match; WeChat notifications never carry this key, so the webhook
+			// check stays a strict single-AppID comparison.
+			mpAppID := strings.TrimSpace(metadata["mp_appid"])
+			// The snapshot records whichever AppID the order actually used, so the
+			// base merchant AppID and the JSAPI MP AppID are both acceptable matches.
+			matched := strings.EqualFold(expected, actual) ||
+				(mpAppID != "" && strings.EqualFold(expected, mpAppID))
+			switch {
+			case actual == "" && mpAppID == "":
 				return fmt.Errorf("wxpay notification missing appid")
-			}
-			if !strings.EqualFold(expected, actual) {
+			case !matched:
 				return fmt.Errorf("wxpay appid mismatch: expected %s, got %s", expected, actual)
 			}
 		}

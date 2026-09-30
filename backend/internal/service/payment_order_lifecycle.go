@@ -375,9 +375,21 @@ func (s *PaymentService) ReconcilePendingPaymentOrders(ctx context.Context) (int
 // whose pending orders are actively re-queried upstream. Orders routed through a
 // provider are matched on provider_key as well, because the stored payment_type
 // keeps the user-facing method (e.g. EasyPay orders are stored as alipay/wxpay).
+//
+// Every provider in the registry implements payment.Provider, which requires
+// QueryOrder, so each listed channel can be reconciled: Alipay/WxPay/EasyPay via
+// the merchant trade number, Stripe via the PaymentIntent id and Airwallex via
+// the payment intent id. Stripe is listed under its base type only because
+// "card"/"link" are normalized to "stripe" before the order is stored.
 func reconcilablePaymentChannelPredicates() []predicate.PaymentOrder {
 	var predicates []predicate.PaymentOrder
-	for _, key := range []string{payment.TypeWxpay, payment.TypeAlipay, payment.TypeEasyPay} {
+	for _, key := range []string{
+		payment.TypeWxpay,
+		payment.TypeAlipay,
+		payment.TypeEasyPay,
+		payment.TypeStripe,
+		payment.TypeAirwallex,
+	} {
 		predicates = append(predicates,
 			paymentorder.PaymentTypeEQ(key),
 			paymentorder.PaymentTypeHasPrefix(key+"_"),

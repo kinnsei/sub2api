@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"entgo.io/ent/dialect"
 	dbent "github.com/Wei-Shaw/sub2api/ent"
 	"github.com/Wei-Shaw/sub2api/ent/paymentorder"
 	"github.com/Wei-Shaw/sub2api/internal/payment"
@@ -106,12 +107,35 @@ func (s *PaymentService) CreateOrder(ctx context.Context, req CreateOrderRequest
 	}
 	resp, err := s.invokeProvider(ctx, order, req, cfg, limitAmount, payAmountStr, payAmount, plan, sel)
 	if err != nil {
-		_, _ = s.entClient.PaymentOrder.UpdateOneID(order.ID).
-			SetStatus(OrderStatusFailed).
-			Save(ctx)
+		s.markOrderFailedAfterProviderError(ctx, order.ID, sel.ProviderKey, err)
 		return nil, err
 	}
 	return resp, nil
+}
+
+// markOrderFailedAfterProviderError marks a freshly created order as FAILED after
+// the provider call failed, but only while the order is still PENDING. A concurrent
+// notification (or the reconciliation worker) may already have moved the order to
+// PAID/RECHARGING/COMPLETED and credited the user; an unconditional write would
+// silently downgrade a fulfilled order back to FAILED. The provider error is never
+// replaced by an error from this bookkeeping write.
+func (s *PaymentService) markOrderFailedAfterProviderError(ctx context.Context, orderID int64, providerKey string, providerErr error) {
+	if s == nil || s.entClient == nil || orderID <= 0 {
+		return
+	}
+	updated, err := s.entClient.PaymentOrder.Update().
+		Where(paymentorder.IDEQ(orderID), paymentorder.StatusEQ(OrderStatusPending)).
+		SetStatus(OrderStatusFailed).
+		Save(ctx)
+	if err != nil {
+		slog.Error("[PaymentService] mark order failed after provider error",
+			"order_id", orderID, "provider", providerKey, "provider_error", providerErr, "error", err)
+		return
+	}
+	if updated == 0 {
+		slog.Warn("[PaymentService] skipped marking order failed: order no longer pending",
+			"order_id", orderID, "provider", providerKey, "provider_error", providerErr)
+	}
 }
 
 func (s *PaymentService) validateOrderInput(ctx context.Context, req CreateOrderRequest, cfg *PaymentConfig) (*dbent.SubscriptionPlan, error) {
@@ -177,6 +201,16 @@ func (s *PaymentService) createOrderInTx(ctx context.Context, req CreateOrderReq
 		selectedInstanceID = strings.TrimSpace(sel.InstanceID)
 		selectedProviderKey = strings.TrimSpace(sel.ProviderKey)
 	}
+	// The settlement currency this order is priced in, resolved from the same config
+	// the pay-amount math used in CreateOrder. Persist it on the row: the snapshot
+	// only carries a currency for Stripe/Airwallex/wxpay, so deriving it from the
+	// snapshot alone forced Alipay/EasyPay orders to fall back to the default.
+	// Recording it here makes every channel's currency explicit and independent of
+	// snapshot contents, and matches what PaymentOrderCurrency reported before.
+	orderCurrency := payment.DefaultPaymentCurrency
+	if sel != nil {
+		orderCurrency = paymentProviderConfigCurrency(sel.ProviderKey, sel.Config)
+	}
 	b := tx.PaymentOrder.Create().
 		SetUserID(req.UserID).
 		SetUserEmail(user.Email).
@@ -189,6 +223,7 @@ func (s *PaymentService) createOrderInTx(ctx context.Context, req CreateOrderReq
 		SetOutTradeNo(outTradeNo).
 		SetPaymentType(req.PaymentType).
 		SetPaymentTradeNo("").
+		SetCurrency(orderCurrency).
 		SetOrderType(req.OrderType).
 		SetStatus(OrderStatusPending).
 		SetExpiresAt(exp).
@@ -243,6 +278,14 @@ func (s *PaymentService) checkPendingLimit(ctx context.Context, tx *dbent.Tx, us
 	if max <= 0 {
 		max = defaultMaxPendingOrders
 	}
+	// Serialize this user's order creation before counting. Counting and later
+	// inserting in the same transaction is not serializable on its own: two
+	// concurrent creators both observe count < max and both insert, so the
+	// per-user pending cap can be exceeded. The lock is Postgres-only; SQLite
+	// (unit tests) has no advisory locks or row locks.
+	if err := lockPaymentOrderUserQuota(ctx, tx, userID); err != nil {
+		return err
+	}
 	c, err := tx.PaymentOrder.Query().Where(paymentorder.UserIDEQ(userID), paymentorder.StatusEQ(OrderStatusPending)).Count(ctx)
 	if err != nil {
 		return fmt.Errorf("count pending orders: %w", err)
@@ -252,6 +295,30 @@ func (s *PaymentService) checkPendingLimit(ctx context.Context, tx *dbent.Tx, us
 			WithMetadata(map[string]string{"max": strconv.Itoa(max)})
 	}
 	return nil
+}
+
+// paymentOrderUserQuotaLockKey scopes the create-order quota lock to a single
+// user. Transaction-scoped advisory locks are released when the transaction ends.
+func paymentOrderUserQuotaLockKey(userID int64) string {
+	return fmt.Sprintf("payment-order-quota:user:%d", userID)
+}
+
+// lockPaymentOrderUserQuota takes the per-user payment-order quota lock inside
+// the create-order transaction, before the pending/daily counts are read, and
+// holds it until commit or rollback. That makes the read-then-insert window
+// exclusive per user. Non-Postgres dialects (SQLite unit tests) are a no-op.
+func lockPaymentOrderUserQuota(ctx context.Context, tx *dbent.Tx, userID int64) error {
+	if tx == nil || userID <= 0 {
+		return nil
+	}
+	if tx.Client().Driver().Dialect() != dialect.Postgres {
+		return nil
+	}
+	rows, err := tx.QueryContext(ctx, "SELECT pg_advisory_xact_lock($1)", hashAdvisoryLockID(paymentOrderUserQuotaLockKey(userID)))
+	if err != nil {
+		return fmt.Errorf("lock pending order quota: %w", err)
+	}
+	return rows.Close()
 }
 
 func buildPaymentOrderProviderSnapshot(sel *payment.InstanceSelection, req CreateOrderRequest) map[string]any {
@@ -325,6 +392,14 @@ func paymentOrderSnapshotWxpayAppID(sel *payment.InstanceSelection, req CreateOr
 func (s *PaymentService) checkDailyLimit(ctx context.Context, tx *dbent.Tx, userID int64, amount, limit float64) error {
 	if limit <= 0 {
 		return nil
+	}
+	// Same read-then-write race as checkPendingLimit: the daily total is summed
+	// here and the order that contributes to it is inserted later in this same
+	// transaction. The per-user quota lock (taken by checkPendingLimit before
+	// this call) already serializes that window; this guard keeps the function
+	// correct on its own and when the pending cap is disabled.
+	if err := lockPaymentOrderUserQuota(ctx, tx, userID); err != nil {
+		return err
 	}
 	ts := psStartOfDayUTC(time.Now())
 	orders, err := tx.PaymentOrder.Query().Where(paymentorder.UserIDEQ(userID), paymentorder.StatusIn(OrderStatusPaid, OrderStatusRecharging, OrderStatusCompleted), paymentorder.PaidAtGTE(ts)).All(ctx)

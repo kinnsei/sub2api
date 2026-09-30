@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"testing"
 
+	dbent "github.com/Wei-Shaw/sub2api/ent"
 	"github.com/Wei-Shaw/sub2api/internal/payment"
 	"github.com/stretchr/testify/require"
 )
@@ -186,6 +187,99 @@ func TestBuildPaymentOrderProviderSnapshot_IncludesProviderCurrency(t *testing.T
 	}, CreateOrderRequest{})
 	require.Equal(t, "USD", airwallexSnapshot["currency"])
 	require.Equal(t, "acct-78", airwallexSnapshot["merchant_id"])
+}
+
+// ---------------------------------------------------------------------------
+// wxpay merchant identity parity with the stored snapshot
+// ---------------------------------------------------------------------------
+
+// wxpaySnapshotOrder builds the order row the refund path validates against.
+func wxpaySnapshotOrder(merchantAppID string) *dbent.PaymentOrder {
+	return &dbent.PaymentOrder{
+		PaymentType: payment.TypeWxpay,
+		ProviderSnapshot: map[string]any{
+			"schema_version":  2,
+			"merchant_app_id": merchantAppID,
+			"merchant_id":     "1900000001",
+			"currency":        "CNY",
+		},
+	}
+}
+
+func TestValidateProviderSnapshotMetadata_WxpayIdentityMetadataMatchesSnapshot(t *testing.T) {
+	t.Parallel()
+
+	t.Run("refund identity of a native order passes", func(t *testing.T) {
+		t.Parallel()
+		order := wxpaySnapshotOrder("wx-merchant-app")
+		identity := map[string]string{
+			"appid":    "wx-merchant-app",
+			"mchid":    "1900000001",
+			"currency": "CNY",
+		}
+		require.NoError(t, validateProviderSnapshotMetadata(order, payment.TypeWxpay, identity))
+	})
+
+	t.Run("refund identity of a JSAPI order passes via mp_appid", func(t *testing.T) {
+		t.Parallel()
+		// The order settled under the dedicated MP AppID, so the snapshot holds
+		// mpAppId while the provider identity reports appid=base, mp_appid=mp.
+		order := wxpaySnapshotOrder("wx-mp-app")
+		identity := map[string]string{
+			"appid":    "wx-merchant-app",
+			"mp_appid": "wx-mp-app",
+			"mchid":    "1900000001",
+			"currency": "CNY",
+		}
+		require.NoError(t, validateProviderSnapshotMetadata(order, payment.TypeWxpay, identity))
+	})
+
+	t.Run("a genuinely different app id is still rejected", func(t *testing.T) {
+		t.Parallel()
+		order := wxpaySnapshotOrder("wx-mp-app")
+		identity := map[string]string{
+			"appid":    "wx-some-other-app",
+			"mp_appid": "wx-another-mp-app",
+			"mchid":    "1900000001",
+			"currency": "CNY",
+		}
+		err := validateProviderSnapshotMetadata(order, payment.TypeWxpay, identity)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "wxpay appid mismatch")
+	})
+
+	t.Run("same base app id but different MP app id is rejected", func(t *testing.T) {
+		t.Parallel()
+		// Two instances may share a merchant appid while using different MP
+		// AppIDs. The MP AppID is the discriminator, so accepting the base appid
+		// alone would refund a JSAPI order through the wrong merchant.
+		order := wxpaySnapshotOrder("wx-mp-app")
+		identity := map[string]string{
+			"appid":    "wx-merchant-app",
+			"mp_appid": "wx-other-mp-app",
+			"mchid":    "1900000001",
+			"currency": "CNY",
+		}
+		err := validateProviderSnapshotMetadata(order, payment.TypeWxpay, identity)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "wxpay appid mismatch")
+	})
+
+	t.Run("provider identity supplies appid, snapshot keeps strict webhook semantics", func(t *testing.T) {
+		t.Parallel()
+		// Webhook metadata never carries mp_appid, so a JSAPI-settled order whose
+		// notification reports the base AppID would now be a mismatch. That is
+		// pre-existing behaviour and is asserted here so it cannot regress silently.
+		order := wxpaySnapshotOrder("wx-mp-app")
+		err := validateProviderSnapshotMetadata(order, payment.TypeWxpay, map[string]string{
+			"appid":       "wx-merchant-app",
+			"mchid":       "1900000001",
+			"currency":    "CNY",
+			"trade_state": "SUCCESS",
+		})
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "wxpay appid mismatch")
+	})
 }
 
 func valueOrEmpty(v *string) string {

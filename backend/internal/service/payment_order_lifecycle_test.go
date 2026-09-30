@@ -5,6 +5,7 @@ package service
 import (
 	"context"
 	"database/sql"
+	"strings"
 	"testing"
 	"time"
 
@@ -724,6 +725,88 @@ func TestReconcilePendingPaymentOrdersQueriesAlipayOrder(t *testing.T) {
 	require.Zero(t, recovered)
 	require.Equal(t, 1, provider.queryCalls)
 	require.Equal(t, order.OutTradeNo, provider.lastQueryTradeNo)
+}
+
+func TestReconcilePendingPaymentOrdersQueriesStripeAndAirwallexOrders(t *testing.T) {
+	ctx := context.Background()
+
+	for _, tc := range []struct {
+		name        string
+		paymentType string
+		providerKey string
+		outTradeNo  string
+		tradeNo     string
+	}{
+		{
+			name:        "stripe",
+			paymentType: payment.TypeStripe,
+			providerKey: payment.TypeStripe,
+			outTradeNo:  "sub2_stripe_reconcile",
+			tradeNo:     "pi_stripe_reconcile",
+		},
+		{
+			name:        "airwallex",
+			paymentType: payment.TypeAirwallex,
+			providerKey: payment.TypeAirwallex,
+			outTradeNo:  "sub2_airwallex_reconcile",
+			tradeNo:     "int_airwallex_reconcile",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := newPaymentOrderLifecycleTestClient(t)
+
+			user, err := client.User.Create().
+				SetEmail(tc.name + "-reconcile@example.com").
+				SetPasswordHash("hash").
+				SetUsername(tc.name + "-reconcile-user").
+				Save(ctx)
+			require.NoError(t, err)
+
+			order, err := client.PaymentOrder.Create().
+				SetUserID(user.ID).
+				SetUserEmail(user.Email).
+				SetUserName(user.Username).
+				SetAmount(50).
+				SetPayAmount(50).
+				SetFeeRate(0).
+				SetRechargeCode("RECONCILE-" + strings.ToUpper(tc.name)).
+				SetOutTradeNo(tc.outTradeNo).
+				SetPaymentType(tc.paymentType).
+				SetPaymentTradeNo(tc.tradeNo).
+				SetOrderType(payment.OrderTypeBalance).
+				SetStatus(OrderStatusPending).
+				SetExpiresAt(time.Now().Add(time.Hour)).
+				SetClientIP("127.0.0.1").
+				SetSrcHost("api.example.com").
+				Save(ctx)
+			require.NoError(t, err)
+
+			registry := payment.NewRegistry()
+			queryProvider := &paymentOrderLifecycleQueryProvider{
+				key: tc.providerKey,
+				resp: &payment.QueryOrderResponse{
+					TradeNo: tc.tradeNo,
+					Status:  payment.ProviderStatusPending,
+				},
+			}
+			registry.Register(queryProvider)
+
+			svc := &PaymentService{
+				entClient:       client,
+				registry:        registry,
+				providersLoaded: true,
+			}
+
+			recovered, err := svc.ReconcilePendingPaymentOrders(ctx)
+			require.NoError(t, err)
+			require.Zero(t, recovered)
+			// Before the fix these channels were not selected at all, so no
+			// upstream query was ever issued and the order only expired.
+			require.Equal(t, 1, queryProvider.queryCalls)
+			require.Equal(t, tc.tradeNo, queryProvider.lastQueryTradeNo)
+			require.Equal(t, tc.outTradeNo, order.OutTradeNo)
+		})
+	}
 }
 
 func TestVerifyOrderByOutTradeNoUsesOutTradeNoWhenPaymentTradeNoAlreadyExistsForAlipay(t *testing.T) {

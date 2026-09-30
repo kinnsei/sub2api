@@ -117,12 +117,22 @@ func TestPcAggregateMethodLimits(t *testing.T) {
 		}
 	})
 
-	t.Run("invalid JSON treated as unlimited", func(t *testing.T) {
+	t.Run("invalid JSON instance ignored instead of treated as unlimited", func(t *testing.T) {
 		t.Parallel()
 		inst := makeInstance(1, "easypay", "alipay", `{invalid json}`)
 		ml := pcAggregateMethodLimits("alipay", []*dbent.PaymentProviderInstance{inst})
 		if ml.SingleMin != 0 || ml.SingleMax != 0 {
-			t.Fatalf("invalid JSON should be treated as unlimited, got %+v", ml)
+			t.Fatalf("an unreadable instance must not widen the advertised range, got %+v", ml)
+		}
+	})
+
+	t.Run("invalid JSON instance does not mask a healthy sibling's limits", func(t *testing.T) {
+		t.Parallel()
+		broken := makeInstance(1, "easypay", "alipay", `{invalid json}`)
+		healthy := makeInstance(2, "easypay", "alipay", `{"alipay":{"singleMin":7,"singleMax":70}}`)
+		ml := pcAggregateMethodLimits("alipay", []*dbent.PaymentProviderInstance{broken, healthy})
+		if ml.SingleMin != 7 || ml.SingleMax != 70 {
+			t.Fatalf("limits = min:%v max:%v, want min:7 max:70 from the readable instance", ml.SingleMin, ml.SingleMax)
 		}
 	})
 
@@ -373,9 +383,12 @@ func TestPcInstanceTypeLimits(t *testing.T) {
 	t.Run("empty limits string returns false", func(t *testing.T) {
 		t.Parallel()
 		inst := makeInstance(1, "easypay", "alipay", "")
-		_, ok := pcInstanceTypeLimits(inst, "alipay")
-		if ok {
-			t.Fatal("expected ok=false for empty limits")
+		_, configured, readable := pcInstanceTypeLimits(inst, "alipay")
+		if configured {
+			t.Fatal("expected configured=false for empty limits")
+		}
+		if !readable {
+			t.Fatal("empty limits is a legitimate unlimited state, expected readable=true")
 		}
 	})
 
@@ -383,9 +396,9 @@ func TestPcInstanceTypeLimits(t *testing.T) {
 		t.Parallel()
 		inst := makeInstance(1, "easypay", "alipay",
 			`{"alipay":{"singleMin":2,"singleMax":14,"dailyLimit":500}}`)
-		cl, ok := pcInstanceTypeLimits(inst, "alipay")
-		if !ok {
-			t.Fatal("expected ok=true")
+		cl, configured, readable := pcInstanceTypeLimits(inst, "alipay")
+		if !configured || !readable {
+			t.Fatalf("expected configured=true readable=true, got configured=%v readable=%v", configured, readable)
 		}
 		if cl.SingleMin != 2 || cl.SingleMax != 14 || cl.DailyLimit != 500 {
 			t.Fatalf("limits = %+v, want min:2 max:14 daily:500", cl)
@@ -396,20 +409,97 @@ func TestPcInstanceTypeLimits(t *testing.T) {
 		t.Parallel()
 		inst := makeInstance(1, "easypay", "alipay",
 			`{"wxpay":{"singleMin":1}}`)
-		_, ok := pcInstanceTypeLimits(inst, "alipay")
-		if ok {
-			t.Fatal("expected ok=false for missing type")
+		_, configured, readable := pcInstanceTypeLimits(inst, "alipay")
+		if configured {
+			t.Fatal("expected configured=false for missing type")
+		}
+		if !readable {
+			t.Fatal("a missing type key means unlimited, expected readable=true")
 		}
 	})
 
-	t.Run("invalid JSON returns false", func(t *testing.T) {
+	t.Run("invalid JSON is not readable and not configured", func(t *testing.T) {
 		t.Parallel()
 		inst := makeInstance(1, "easypay", "alipay", `{bad json}`)
-		_, ok := pcInstanceTypeLimits(inst, "alipay")
-		if ok {
-			t.Fatal("expected ok=false for invalid JSON")
+		_, configured, readable := pcInstanceTypeLimits(inst, "alipay")
+		if configured {
+			t.Fatal("expected configured=false for invalid JSON")
+		}
+		if readable {
+			t.Fatal("expected readable=false for invalid JSON so callers fail closed")
 		}
 	})
+}
+
+// The user-facing limits response must agree with the load balancer: an
+// instance whose limits JSON is unreadable is skipped during selection, so it
+// must not be advertised as an unlimited channel either.
+func TestGetAvailableMethodLimitsSkipsUnreadableLimitsInstances(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	client := newPaymentConfigServiceTestClient(t)
+
+	_, err := client.PaymentProviderInstance.Create().
+		SetProviderKey(payment.TypeEasyPay).
+		SetName("Broken Limits").
+		SetConfig("{}").
+		SetSupportedTypes("alipay").
+		SetLimits("not-json{").
+		SetEnabled(true).
+		Save(ctx)
+	require.NoError(t, err)
+
+	svc := &PaymentConfigService{entClient: client, settingRepo: &paymentConfigSettingRepoStub{values: map[string]string{}}}
+
+	resp, err := svc.GetAvailableMethodLimits(ctx)
+	require.NoError(t, err)
+	if _, ok := resp.Methods[payment.TypeAlipay]; ok {
+		t.Fatalf("alipay must not be advertised while its only instance is unroutable, got %+v", resp.Methods)
+	}
+	require.Equal(t, 0.0, resp.GlobalMin)
+	require.Equal(t, 0.0, resp.GlobalMax)
+
+	// A readable sibling keeps the method advertised with that sibling's caps.
+	_, err = client.PaymentProviderInstance.Create().
+		SetProviderKey(payment.TypeEasyPay).
+		SetName("Healthy").
+		SetConfig("{}").
+		SetSupportedTypes("wxpay").
+		SetLimits(`{"wxpay":{"singleMin":5,"singleMax":50}}`).
+		SetEnabled(true).
+		Save(ctx)
+	require.NoError(t, err)
+
+	resp, err = svc.GetAvailableMethodLimits(ctx)
+	require.NoError(t, err)
+	wxpayLimits, ok := resp.Methods[payment.TypeWxpay]
+	require.True(t, ok, "readable wxpay instance must stay advertised")
+	require.Equal(t, 5.0, wxpayLimits.SingleMin)
+	require.Equal(t, 50.0, wxpayLimits.SingleMax)
+}
+
+func TestGetMethodLimitsSkipsUnreadableLimitsInstances(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	client := newPaymentConfigServiceTestClient(t)
+
+	_, err := client.PaymentProviderInstance.Create().
+		SetProviderKey(payment.TypeEasyPay).
+		SetName("Broken Limits").
+		SetConfig("{}").
+		SetSupportedTypes("alipay").
+		SetLimits("not-json{").
+		SetEnabled(true).
+		Save(ctx)
+	require.NoError(t, err)
+
+	svc := &PaymentConfigService{entClient: client, settingRepo: &paymentConfigSettingRepoStub{values: map[string]string{}}}
+
+	limits, err := svc.GetMethodLimits(ctx, []string{payment.TypeAlipay})
+	require.NoError(t, err)
+	require.Empty(t, limits, "an unroutable instance must not produce a method limits entry")
 }
 
 func TestGetAvailableMethodLimitsUsesConfiguredVisibleMethodSource(t *testing.T) {

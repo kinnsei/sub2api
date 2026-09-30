@@ -248,12 +248,6 @@ func (s *paymentFulfillmentSettingRepoStub) Delete(_ context.Context, key string
 	return nil
 }
 
-func ensurePaymentAuditOrderActionUniqueIndex(t *testing.T, ctx context.Context, client *dbent.Client) {
-	t.Helper()
-	_, err := client.ExecContext(ctx, "CREATE UNIQUE INDEX IF NOT EXISTS idx_payment_audit_logs_order_action_uniq ON payment_audit_logs(order_id, action)")
-	require.NoError(t, err)
-}
-
 // ---------------------------------------------------------------------------
 // resolveRedeemAction — pure idempotency decision logic
 // ---------------------------------------------------------------------------
@@ -704,7 +698,6 @@ func TestRetryFulfillmentRejectsFreshRechargingLease(t *testing.T) {
 func TestAlreadyProcessedRecoversStaleRechargingLease(t *testing.T) {
 	ctx := context.Background()
 	client := newPaymentConfigServiceTestClient(t)
-	ensurePaymentAuditOrderActionUniqueIndex(t, ctx, client)
 	order := createPaymentFulfillmentSubscriptionOrder(
 		t,
 		ctx,
@@ -821,7 +814,6 @@ func TestPaymentRedeemDoesNotIncrementFailureLimit(t *testing.T) {
 func TestExecuteBalanceFulfillmentBypassesUserRedeemRateLimit(t *testing.T) {
 	ctx := context.Background()
 	client := newPaymentConfigServiceTestClient(t)
-	ensurePaymentAuditOrderActionUniqueIndex(t, ctx, client)
 	order := createPaymentFulfillmentSubscriptionOrder(t, ctx, client, OrderStatusPaid, time.Now())
 	order, err := client.PaymentOrder.UpdateOneID(order.ID).
 		SetOrderType(payment.OrderTypeBalance).
@@ -864,7 +856,6 @@ func TestExecuteBalanceFulfillmentBypassesUserRedeemRateLimit(t *testing.T) {
 func TestExecuteBalanceFulfillmentRecoversAfterRedeemWithoutCreditingAgain(t *testing.T) {
 	ctx := context.Background()
 	client := newPaymentConfigServiceTestClient(t)
-	ensurePaymentAuditOrderActionUniqueIndex(t, ctx, client)
 	staleAt := time.Now().Add(-paymentFulfillmentLeaseDuration - time.Minute)
 	order := createPaymentFulfillmentSubscriptionOrder(t, ctx, client, OrderStatusRecharging, staleAt)
 	order, err := client.PaymentOrder.UpdateOneID(order.ID).
@@ -968,7 +959,6 @@ func TestPaymentNotificationRejectsAmountMismatchBeforeFulfillment(t *testing.T)
 func TestExecuteBalanceFulfillmentRejectsCodeUsedByAnotherUser(t *testing.T) {
 	ctx := context.Background()
 	client := newPaymentConfigServiceTestClient(t)
-	ensurePaymentAuditOrderActionUniqueIndex(t, ctx, client)
 	order := createPaymentFulfillmentSubscriptionOrder(t, ctx, client, OrderStatusPaid, time.Now())
 	order, err := client.PaymentOrder.UpdateOneID(order.ID).
 		SetOrderType(payment.OrderTypeBalance).
@@ -1006,7 +996,6 @@ func TestExecuteBalanceFulfillmentRejectsCodeUsedByAnotherUser(t *testing.T) {
 func TestExecuteSubscriptionFulfillmentRecoversCommittedAssignmentWithoutExtendingAgain(t *testing.T) {
 	ctx := context.Background()
 	client := newPaymentConfigServiceTestClient(t)
-	ensurePaymentAuditOrderActionUniqueIndex(t, ctx, client)
 	staleAt := time.Now().Add(-paymentFulfillmentLeaseDuration - time.Minute)
 	order := createPaymentFulfillmentSubscriptionOrder(t, ctx, client, OrderStatusRecharging, staleAt)
 
@@ -1121,7 +1110,6 @@ func assertPaymentSubscriptionExpiry(t *testing.T, repo *subscriptionUserSubRepo
 func TestExecuteSubscriptionFulfillmentAppliesAffiliateRebate(t *testing.T) {
 	ctx := context.Background()
 	client := newPaymentConfigServiceTestClient(t)
-	ensurePaymentAuditOrderActionUniqueIndex(t, ctx, client)
 
 	user, err := client.User.Create().
 		SetEmail("subscription-affiliate@example.com").
@@ -1207,7 +1195,6 @@ func TestExecuteSubscriptionFulfillmentAppliesAffiliateRebate(t *testing.T) {
 func TestExecuteSubscriptionFulfillmentDoesNotDuplicateWorkAfterLegacySuccessAudit(t *testing.T) {
 	ctx := context.Background()
 	client := newPaymentConfigServiceTestClient(t)
-	ensurePaymentAuditOrderActionUniqueIndex(t, ctx, client)
 
 	user, err := client.User.Create().
 		SetEmail("subscription-affiliate-idempotent@example.com").

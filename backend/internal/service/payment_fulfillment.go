@@ -873,13 +873,16 @@ func (s *PaymentService) markFailed(ctx context.Context, oid int64, lease *payme
 	now := time.Now()
 	r := psErrMsg(cause)
 	// The lease version prevents a stale worker from overwriting a newer owner.
+	// fulfillment_attempts is incremented in the same conditional update, so only the
+	// worker that actually owns the lease consumes one attempt.
 	c, e := s.entClient.PaymentOrder.Update().
 		Where(
 			paymentorder.IDEQ(oid),
 			paymentorder.StatusEQ(OrderStatusRecharging),
 			paymentorder.UpdatedAtEQ(lease.version),
 		).
-		SetStatus(OrderStatusFailed).SetFailedAt(now).SetFailedReason(r).Save(ctx)
+		SetStatus(OrderStatusFailed).SetFailedAt(now).SetFailedReason(r).
+		AddFulfillmentAttempts(1).Save(ctx)
 	if e != nil {
 		slog.Error("mark FAILED", "orderID", oid, "error", e)
 	}
@@ -958,18 +961,21 @@ func (s *PaymentService) RetryStuckFulfillments(ctx context.Context) (int, error
 	return retried, nil
 }
 
-// fulfillmentFailureCount counts recorded fulfillment failures for an order.
-// It bounds automatic retries without adding a schema column; a counting error
-// reports 0 so a transient audit-log failure cannot block recovery.
+// fulfillmentFailureCount returns how many automatic fulfillment attempts this
+// order has already consumed, which bounds automatic retries.
+//
+// It reads payment_orders.fulfillment_attempts rather than counting
+// FULFILLMENT_FAILED audit rows: payment_audit_logs has a unique index on
+// (order_id, action) (migration 131), so the audit count could never exceed 1 and
+// the retry budget was unreachable — stuck orders were retried forever.
 func (s *PaymentService) fulfillmentFailureCount(ctx context.Context, oid int64) int {
-	count, err := s.entClient.PaymentAuditLog.Query().
-		Where(
-			paymentauditlog.OrderIDEQ(strconv.FormatInt(oid, 10)),
-			paymentauditlog.ActionEQ("FULFILLMENT_FAILED"),
-		).Count(ctx)
+	o, err := s.entClient.PaymentOrder.Query().
+		Where(paymentorder.IDEQ(oid)).
+		Select(paymentorder.FieldFulfillmentAttempts).
+		Only(ctx)
 	if err != nil {
-		slog.Warn("count fulfillment failures failed", "orderID", oid, "error", err)
+		slog.Warn("read fulfillment attempts failed", "orderID", oid, "error", err)
 		return 0
 	}
-	return count
+	return o.FulfillmentAttempts
 }

@@ -117,6 +117,18 @@ func (s *PaymentOrderExpiryService) runOnce() {
 		slog.Info("[PaymentOrderExpiry] retried stuck fulfillments", "count", retried)
 	}
 
+	// REFUNDING is set before the gateway refund call and cleared by its result. If
+	// the process dies in between, the order would otherwise stay REFUNDING forever
+	// with the user's balance already deducted and no way to finish or undo it.
+	sweepCtx, cancel := context.WithTimeout(context.Background(), expiryCheckTimeout)
+	released, err := s.paymentSvc.SweepStuckRefunds(sweepCtx)
+	cancel()
+	if err != nil {
+		slog.Warn("[PaymentOrderExpiry] failed to sweep stuck refunds", "error", err)
+	} else if released > 0 {
+		slog.Info("[PaymentOrderExpiry] released stuck refunds", "count", released)
+	}
+
 	expireCtx, cancel := context.WithTimeout(context.Background(), expiryCheckTimeout)
 	defer cancel()
 	expired, err := s.paymentSvc.ExpireTimedOutOrders(expireCtx)

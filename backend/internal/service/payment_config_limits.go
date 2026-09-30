@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	dbent "github.com/Wei-Shaw/sub2api/ent"
@@ -28,6 +29,13 @@ func (s *PaymentConfigService) GetAvailableMethodLimits(ctx context.Context) (*M
 	}
 	feeRate := s.pcMethodFeeRate(ctx)
 	for pt, insts := range typeInstances {
+		insts = pcReadableLimitsInstances(insts, pt)
+		if len(insts) == 0 {
+			// Every instance for this method has unreadable limits, and the load
+			// balancer will refuse to route to them. Advertising the method with
+			// an unlimited range would promise an order that cannot be created.
+			continue
+		}
 		currency, ok := s.pcAggregateMethodCurrency(insts)
 		if !ok {
 			continue
@@ -40,6 +48,19 @@ func (s *PaymentConfigService) GetAvailableMethodLimits(ctx context.Context) (*M
 	}
 	resp.GlobalMin, resp.GlobalMax = pcComputeGlobalRange(resp.Methods)
 	return resp, nil
+}
+
+// pcReadableLimitsInstances drops instances whose stored limits JSON cannot be
+// parsed. Such instances are excluded from load-balancer selection, so they must
+// not influence the advertised limits either.
+func pcReadableLimitsInstances(instances []*dbent.PaymentProviderInstance, pt string) []*dbent.PaymentProviderInstance {
+	readable := make([]*dbent.PaymentProviderInstance, 0, len(instances))
+	for _, inst := range instances {
+		if _, _, ok := pcInstanceTypeLimits(inst, pt); ok {
+			readable = append(readable, inst)
+		}
+	}
+	return readable
 }
 
 // pcMethodFeeRate returns the fee rate reported with per-method limits. Fees are
@@ -107,6 +128,13 @@ func (s *PaymentConfigService) GetMethodLimits(ctx context.Context, types []stri
 			if payment.InstanceSupportsType(inst.SupportedTypes, pt) {
 				matching = append(matching, inst)
 			}
+		}
+		matching = pcReadableLimitsInstances(matching, pt)
+		if len(matching) == 0 {
+			// No instance can serve this method (none configured, or all have
+			// unreadable limits). Reporting a zero-range "available" method here
+			// would contradict the load balancer, which refuses those instances.
+			continue
 		}
 		currency, ok := s.pcAggregateMethodCurrency(matching)
 		if !ok {
@@ -262,18 +290,28 @@ func pcGroupByPaymentType(instances []*dbent.PaymentProviderInstance) map[string
 }
 
 // pcInstanceTypeLimits extracts per-type limits from a provider instance.
-// Returns (limits, true) if configured; (zero, false) if unlimited.
+// Returns (limits, configured, readable).
+//   - configured=false, readable=true: no cap for this type → unlimited.
+//   - readable=false: the stored JSON cannot be parsed. The load balancer
+//     excludes such instances from selection, so callers that advertise or
+//     aggregate limits must not count them as unlimited either.
+//
 // For Stripe instances, limits are stored under "stripe" key regardless of sub-types.
-func pcInstanceTypeLimits(inst *dbent.PaymentProviderInstance, pt string) (payment.ChannelLimits, bool) {
-	if inst.Limits == "" {
-		return payment.ChannelLimits{}, false
+func pcInstanceTypeLimits(inst *dbent.PaymentProviderInstance, pt string) (payment.ChannelLimits, bool, bool) {
+	if inst == nil || inst.Limits == "" {
+		return payment.ChannelLimits{}, false, true
 	}
 	var limits payment.InstanceLimits
 	if err := json.Unmarshal([]byte(inst.Limits), &limits); err != nil {
-		return payment.ChannelLimits{}, false
+		slog.Error("payment provider instance limits unreadable, ignoring instance when aggregating limits",
+			"instance_id", inst.ID,
+			"provider_key", inst.ProviderKey,
+			"payment_type", pt,
+			"error", err)
+		return payment.ChannelLimits{}, false, false
 	}
 	cl, ok := limits[pt]
-	return cl, ok
+	return cl, ok, true
 }
 
 // unionFloat merges a single limit value into the aggregate using UNION semantics.
@@ -314,7 +352,12 @@ func pcAggregateMethodLimits(pt string, instances []*dbent.PaymentProviderInstan
 	minLimited, maxLimited, dailyLimited := true, true, true
 
 	for _, inst := range instances {
-		cl, hasLimits := pcInstanceTypeLimits(inst, pt)
+		cl, hasLimits, readable := pcInstanceTypeLimits(inst, pt)
+		if !readable {
+			// The load balancer refuses to route to an instance whose limits are
+			// unreadable, so it cannot be the source of an unlimited channel.
+			continue
+		}
 		if !hasLimits {
 			return MethodLimits{PaymentType: pt} // any unlimited instance → all zeros
 		}
