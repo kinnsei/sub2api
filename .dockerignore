@@ -35,6 +35,10 @@ build/
 frontend/node_modules/
 node_modules/
 
+# pnpm content-addressable store (installed in container); hundreds of MB of
+# hardlinked package tarballs that would otherwise be uploaded as build context.
+.pnpm-store/
+
 # Go build cache (will be built in container)
 backend/vendor/
 

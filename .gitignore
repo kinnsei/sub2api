@@ -166,3 +166,7 @@ issues/
 /plugins/
 
 !docs/codex-ticket-pinning.md
+.empryo
+
+# pnpm 本地内容寻址存储（由 pnpm install 在仓库根生成，体积可达数百 MB）
+.pnpm-store/
