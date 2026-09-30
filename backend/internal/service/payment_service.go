@@ -134,9 +134,14 @@ type RefundPlan struct {
 	SubDaysToDeduct int
 	SubscriptionID  int64
 	// RefundedBefore is the total already successfully refunded on this order
-	// before this attempt (sum of REFUND_SUCCESS audit entries). It decides
-	// whether the order ends up REFUNDED or PARTIALLY_REFUNDED.
+	// before this attempt, read from the payment_refunds ledger (with a legacy
+	// fallback for orders predating the ledger). It decides whether the order
+	// ends up REFUNDED or PARTIALLY_REFUNDED.
 	RefundedBefore float64
+	// RefundNo identifies this refund installment in the payment_refunds ledger.
+	// It is the idempotency key: retrying the same installment reuses it, so the
+	// retry updates one ledger row instead of inflating the refunded total.
+	RefundNo string
 }
 
 type RefundResult struct {

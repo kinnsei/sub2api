@@ -16,6 +16,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/ent/paymentauditlog"
 	"github.com/Wei-Shaw/sub2api/ent/paymentorder"
 	"github.com/Wei-Shaw/sub2api/ent/paymentproviderinstance"
+	"github.com/Wei-Shaw/sub2api/ent/paymentrefund"
 	"github.com/Wei-Shaw/sub2api/internal/payment"
 	"github.com/Wei-Shaw/sub2api/internal/payment/provider"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
@@ -169,7 +170,11 @@ func (s *PaymentService) RequestRefund(ctx context.Context, oid, uid int64, reas
 	nr := strings.TrimSpace(reason)
 	now := time.Now()
 	by := fmt.Sprintf("%d", uid)
-	c, err := s.entClient.PaymentOrder.Update().Where(paymentorder.IDEQ(oid), paymentorder.UserIDEQ(uid), paymentorder.StatusEQ(OrderStatusCompleted), paymentorder.OrderTypeEQ(payment.OrderTypeBalance)).SetStatus(OrderStatusRefundRequested).SetRefundRequestedAt(now).SetRefundRequestReason(nr).SetRefundRequestedBy(by).SetRefundAmount(o.Amount).Save(ctx)
+	// refund_amount means "cumulative successfully refunded amount" everywhere
+	// else, so a *request* must not write it: doing so made the pre-ledger fallback
+	// (legacyRefundedTotal takes the max of this column and the audit total) treat
+	// the order as already fully refunded, and the request could never be approved.
+	c, err := s.entClient.PaymentOrder.Update().Where(paymentorder.IDEQ(oid), paymentorder.UserIDEQ(uid), paymentorder.StatusEQ(OrderStatusCompleted), paymentorder.OrderTypeEQ(payment.OrderTypeBalance)).SetStatus(OrderStatusRefundRequested).SetRefundRequestedAt(now).SetRefundRequestReason(nr).SetRefundRequestedBy(by).Save(ctx)
 	if err != nil {
 		return fmt.Errorf("update: %w", err)
 	}
@@ -210,7 +215,11 @@ func (s *PaymentService) PrepareRefund(ctx context.Context, oid int64, amt float
 	if err != nil {
 		return nil, nil, infraerrors.NotFound("NOT_FOUND", "order not found")
 	}
-	ok := []string{OrderStatusCompleted, OrderStatusRefundRequested, OrderStatusRefundPending, OrderStatusRefundFailed, OrderStatusPartiallyRefunded}
+	// REFUNDING is included so a refund that died mid-flight (process exit between
+	// the status CAS and the gateway call) can be re-driven instead of becoming a
+	// permanent dead state with the user's balance already deducted. The retry
+	// reuses the same ledger installment, so it cannot double-count the refund.
+	ok := []string{OrderStatusCompleted, OrderStatusRefundRequested, OrderStatusRefundPending, OrderStatusRefunding, OrderStatusRefundFailed, OrderStatusPartiallyRefunded}
 	if !psSliceContains(ok, o.Status) {
 		return nil, nil, infraerrors.BadRequest("INVALID_STATUS", "order status does not allow refund")
 	}
@@ -234,8 +243,11 @@ func (s *PaymentService) PrepareRefund(ctx context.Context, oid int64, amt float
 	tolerance := paymentAmountToleranceForCurrency(orderCurrency)
 	// Partially refunded orders may be refunded again, but only up to the
 	// remaining amount: the budget is the order amount minus everything already
-	// refunded successfully.
-	refundedBefore, err := s.refundedAmountTotal(ctx, oid)
+	// refunded successfully. The refunded total comes from the payment_refunds
+	// ledger, not from audit entries: payment_audit_logs is capped at one row per
+	// (order_id, action) by a unique index, so audit rows cannot represent more
+	// than one refund installment and would inflate the remaining budget.
+	refundedBefore, err := s.refundSucceededTotal(ctx, o)
 	if err != nil {
 		return nil, nil, infraerrors.InternalServer("REFUND_LOOKUP_FAILED", "failed to compute already refunded amount")
 	}
@@ -267,10 +279,14 @@ func (s *PaymentService) PrepareRefund(ctx context.Context, oid int64, amt float
 	return p, nil, nil
 }
 
-// refundedAmountTotal sums the refund amounts already recorded as successful for
-// an order. Audit entries are the source of truth for cumulative refunds because
-// payment_orders.refund_amount only holds the most recent refund.
-func (s *PaymentService) refundedAmountTotal(ctx context.Context, oid int64) (float64, error) {
+// auditRefundedTotal sums REFUND_SUCCESS audit rows for an order.
+//
+// Deprecated as a source of truth: payment_audit_logs carries a unique index on
+// (order_id, action) (migration 131), so at most one REFUND_SUCCESS row can exist
+// per order and this value under-reports any order refunded more than once. It is
+// kept only as a conservative legacy fallback for orders that predate the
+// payment_refunds ledger. See refundSucceededTotal.
+func (s *PaymentService) auditRefundedTotal(ctx context.Context, oid int64) (float64, error) {
 	entries, err := s.entClient.PaymentAuditLog.Query().
 		Where(
 			paymentauditlog.OrderIDEQ(strconv.FormatInt(oid, 10)),
@@ -334,19 +350,64 @@ func (s *PaymentService) deductAvailableBalance(ctx context.Context, userID int6
 }
 
 func (s *PaymentService) ExecuteRefund(ctx context.Context, p *RefundPlan) (*RefundResult, error) {
-	c, err := s.entClient.PaymentOrder.Update().Where(paymentorder.IDEQ(p.OrderID), paymentorder.StatusIn(OrderStatusCompleted, OrderStatusRefundRequested, OrderStatusRefundPending, OrderStatusRefundFailed, OrderStatusPartiallyRefunded)).SetStatus(OrderStatusRefunding).Save(ctx)
+	c, err := s.entClient.PaymentOrder.Update().Where(paymentorder.IDEQ(p.OrderID), paymentorder.StatusIn(OrderStatusCompleted, OrderStatusRefundRequested, OrderStatusRefundPending, OrderStatusRefunding, OrderStatusRefundFailed, OrderStatusPartiallyRefunded)).SetStatus(OrderStatusRefunding).Save(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("lock: %w", err)
 	}
 	if c == 0 {
 		return nil, infraerrors.Conflict("CONFLICT", "order status changed")
 	}
+
+	// Re-validate the refundable remainder *after* winning the status CAS.
+	//
+	// PrepareRefund computed the remainder from a snapshot, and the admin handler
+	// calls PrepareRefund and ExecuteRefund as two separate steps. Two concurrent
+	// refunds can therefore both prepare against "nothing refunded yet" and both
+	// carry the full order amount; the status CAS only lets one of them proceed at
+	// a time, but the second one would then execute with a stale refundedBefore and
+	// over-refund. Re-reading the ledger here — while the order is pinned to
+	// REFUNDING, so no other refund can be mid-flight — closes that window.
+	//
+	// A re-drive of the current installment is unaffected: that row is still
+	// REFUNDING and so is not counted as already refunded.
+	if err := s.validateRefundRemainder(ctx, p); err != nil {
+		// Rejecting the plan must not damage state: the order is pinned to
+		// REFUNDING right now, and a successful refund may have landed since the
+		// plan was prepared. Releasing it back to the status recorded in the stale
+		// snapshot would erase that PARTIALLY_REFUNDED/REFUNDED outcome.
+		s.restoreStatusFromLedger(ctx, p)
+		return nil, err
+	}
+
+	// Claim this refund installment in the ledger before touching the gateway. The
+	// ledger is what makes the refunded total correct, so a gateway call must never
+	// happen without a corresponding ledger row. A retry of the same installment
+	// reuses p.RefundNo and updates that row in place.
+	refundNo, err := s.ensureRefundLedgerClaim(ctx, p)
+	if err != nil {
+		s.restoreStatus(ctx, p)
+		return nil, err
+	}
+	p.RefundNo = refundNo
+
 	if p.DeductionType == payment.DeductionTypeBalance && p.BalanceToDeduct > 0 {
-		// Skip balance deduction on retry if previous attempt already deducted
-		// but failed to roll back (REFUND_ROLLBACK_FAILED in audit log).
-		if !s.hasAuditLog(ctx, p.OrderID, "REFUND_ROLLBACK_FAILED") {
+		// Skip balance deduction on retry if a previous attempt already deducted
+		// but failed to roll back; the ledger records that outcome explicitly
+		// instead of relying on an audit-log existence check.
+		if gErr := s.refundLedgerAllowsDeduction(ctx, p.OrderID, refundNo); gErr == nil {
+			// Persist "a deduction may be in flight" BEFORE touching the user's
+			// balance: there is no transaction spanning the deduction and the
+			// gateway call, so a crash in that window must leave a durable record
+			// that the money may already be gone.
+			if err := s.markRefundLedgerDeductionInFlight(ctx, p.OrderID, refundNo); err != nil {
+				s.restoreStatus(ctx, p)
+				return nil, err
+			}
 			deducted, err := s.deductAvailableBalance(ctx, p.Order.UserID, p.BalanceToDeduct)
 			if err != nil {
+				// The deduction call failed, so nothing was taken: clear the
+				// in-flight marker rather than under-deducting the user forever.
+				s.markRefundLedgerDeductionNotApplied(ctx, p.OrderID, refundNo)
 				s.restoreStatus(ctx, p)
 				return nil, fmt.Errorf("deduction: %w", err)
 			}
@@ -357,9 +418,16 @@ func (s *PaymentService) ExecuteRefund(ctx context.Context, p *RefundPlan) (*Ref
 		}
 	}
 	if p.DeductionType == payment.DeductionTypeSubscription && p.SubDaysToDeduct > 0 && p.SubscriptionID > 0 {
-		if !s.hasAuditLog(ctx, p.OrderID, "REFUND_ROLLBACK_FAILED") {
+		if s.refundLedgerAllowsDeduction(ctx, p.OrderID, refundNo) == nil {
+			if err := s.markRefundLedgerDeductionInFlight(ctx, p.OrderID, refundNo); err != nil {
+				s.restoreStatus(ctx, p)
+				return nil, err
+			}
 			_, err := s.subscriptionSvc.ExtendSubscription(ctx, p.SubscriptionID, -p.SubDaysToDeduct)
 			if err != nil {
+				// Only ErrAdjustWouldExpire and hard errors reach here; both leave
+				// the subscription unchanged, so the marker can be cleared safely.
+				s.markRefundLedgerDeductionNotApplied(ctx, p.OrderID, refundNo)
 				if errors.Is(err, ErrAdjustWouldExpire) {
 					// Deduction would expire the subscription — revoke it entirely
 					slog.Info("subscription deduction would expire, revoking", "orderID", p.OrderID, "subID", p.SubscriptionID, "days", p.SubDaysToDeduct)
@@ -383,6 +451,60 @@ func (s *PaymentService) ExecuteRefund(ctx context.Context, p *RefundPlan) (*Ref
 		return s.handleGwFail(ctx, p, err)
 	}
 	return s.finishRefund(ctx, p, resp)
+}
+
+// ensureRefundLedgerClaim returns the ledger installment number for this attempt.
+//
+// A REFUNDING order is one whose previous attempt died before reaching a terminal
+// state. In that case we reuse the existing in-flight installment (same RefundNo)
+// so the retry refines that row instead of adding a second one. Otherwise a new
+// installment number is derived for a fresh refund.
+func (s *PaymentService) ensureRefundLedgerClaim(ctx context.Context, p *RefundPlan) (string, error) {
+	if strings.TrimSpace(p.RefundNo) != "" {
+		return p.RefundNo, nil
+	}
+	client := paymentServiceRefundClient{s.entClient}
+	if row, err := s.activeRefundLedgerRow(ctx, p.OrderID); err != nil {
+		return "", infraerrors.InternalServer("REFUND_LOOKUP_FAILED", "failed to read refund ledger")
+	} else if row != nil {
+		// Re-drive the same installment; keep the original amount so the ledger
+		// stays consistent with what was sent to the gateway.
+		p.RefundNo = row.RefundNo
+		p.RefundAmount = row.Amount
+		p.GatewayAmount = row.GatewayAmount
+		return row.RefundNo, nil
+	}
+	refundNo, err := s.nextRefundNo(ctx, client, p.OrderID)
+	if err != nil {
+		return "", infraerrors.InternalServer("REFUND_LOOKUP_FAILED", "failed to allocate refund installment number")
+	}
+	if err := s.upsertRefundLedgerClaim(ctx, client, p.OrderID, refundNo, p.RefundAmount, p.GatewayAmount, PaymentOrderCurrency(p.Order), p.Reason, "admin", p.Force); err != nil {
+		if infraerrors.Reason(err) == "REFUND_IN_PROGRESS" {
+			return "", err
+		}
+		return "", infraerrors.InternalServer("REFUND_LOOKUP_FAILED", "failed to record refund installment")
+	}
+	return refundNo, nil
+}
+
+// refundLedgerAllowsDeduction reports (nil error) whether a retry of this
+// installment should still perform the balance/subscription deduction. If a
+// previous attempt already deducted but could not roll the deduction back, the
+// ledger row records deductionRollbackOK=false and the retry must not deduct again.
+func (s *PaymentService) refundLedgerAllowsDeduction(ctx context.Context, orderID int64, refundNo string) error {
+	row, err := s.entClient.PaymentRefund.Query().
+		Where(paymentrefund.OrderIDEQ(orderID), paymentrefund.RefundNoEQ(refundNo)).
+		Only(ctx)
+	if err != nil {
+		if dbent.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+	if row.DeductionRollbackOk {
+		return nil
+	}
+	return fmt.Errorf("previous refund attempt left a failed deduction rollback")
 }
 
 func (s *PaymentService) gwRefund(ctx context.Context, p *RefundPlan) (*payment.RefundResponse, error) {
@@ -416,6 +538,11 @@ func (s *PaymentService) gwRefund(ctx context.Context, p *RefundPlan) (*payment.
 		OrderID: p.Order.OutTradeNo,
 		Amount:  formatGatewayRefundAmount(p.GatewayAmount, p.Order),
 		Reason:  p.Reason,
+		// Passing the persisted installment number gives providers that support an
+		// idempotency reference (Alipay out_request_no) the same value on a retry,
+		// so a re-driven refund is recognised as the same request instead of being
+		// sent to the gateway a second time.
+		RefundNo: p.RefundNo,
 	})
 	finishProviderCall()
 	if err != nil {
@@ -481,10 +608,31 @@ func (s *PaymentService) QueryAndFinalizeRefund(ctx context.Context, oid int64) 
 		return nil, infraerrors.BadRequest("REFUND_QUERY_UNSUPPORTED", "this payment provider does not support refund status query; please verify manually")
 	}
 
-	pendingDetail := s.latestRefundPendingDetail(ctx, oid)
-	// Legacy REFUND_PENDING audit entries predate the recorded installment
-	// amount; fall back to the order's refund_amount in that case.
-	pendingAmount := pendingDetail.RefundAmount
+	// The in-flight ledger installment is the source of truth for the pending
+	// refund's amount, provider refund id and deduction rollback outcome.
+	// legacyPendingDetail covers orders whose refund predates the ledger.
+	ledgerRow, err := s.activeRefundLedgerRow(ctx, oid)
+	if err != nil {
+		return nil, infraerrors.InternalServer("REFUND_LOOKUP_FAILED", "failed to read refund ledger")
+	}
+	pendingAmount := 0.0
+	refundNo := ""
+	refundID := ""
+	// Assigned by both branches below; no default is needed.
+	var deductionRollbackOK bool
+	if ledgerRow != nil {
+		pendingAmount = ledgerRow.Amount
+		refundNo = ledgerRow.RefundNo
+		refundID = ledgerRow.ProviderRefundID
+		deductionRollbackOK = ledgerRow.DeductionRollbackOk
+	} else {
+		pendingDetail := s.latestRefundPendingDetail(ctx, oid)
+		pendingAmount = pendingDetail.RefundAmount
+		refundID = pendingDetail.RefundID
+		deductionRollbackOK = pendingDetail.DeductionRollbackOk
+	}
+	// Legacy REFUND_PENDING audit entries (and pre-ledger orders) predate the
+	// recorded installment amount; fall back to the order's refund_amount.
 	if pendingAmount <= 0 {
 		pendingAmount = o.RefundAmount
 	}
@@ -492,7 +640,7 @@ func (s *PaymentService) QueryAndFinalizeRefund(ctx context.Context, oid int64) 
 	resp, err := queryProvider.QueryRefund(ctx, payment.RefundQueryRequest{
 		TradeNo:  o.PaymentTradeNo,
 		OrderID:  o.OutTradeNo,
-		RefundID: pendingDetail.RefundID,
+		RefundID: refundID,
 		Amount:   formatGatewayRefundAmount(pendingAmount, o),
 	})
 	finishProviderCall()
@@ -500,15 +648,16 @@ func (s *PaymentService) QueryAndFinalizeRefund(ctx context.Context, oid int64) 
 		return nil, fmt.Errorf("query refund: %w", err)
 	}
 	if err := validateRefundProviderResponse(resp); err != nil {
-		return s.finalizeRefundFailed(ctx, o, err)
+		return s.finalizeRefundFailed(ctx, o, refundNo, err)
 	}
 
-	refundedBefore, err := s.refundedAmountTotal(ctx, oid)
+	refundedBefore, err := s.refundSucceededTotal(ctx, o)
 	if err != nil {
 		return nil, infraerrors.InternalServer("REFUND_LOOKUP_FAILED", "failed to compute already refunded amount")
 	}
 	plan := s.refundFinalizePlan(o, pendingAmount, refundedBefore)
-	if !pendingDetail.DeductionRollbackOK {
+	plan.RefundNo = refundNo
+	if !deductionRollbackOK {
 		plan.BalanceToDeduct = 0
 		plan.SubDaysToDeduct = 0
 	} else if o.OrderType == payment.OrderTypeSubscription {
@@ -523,7 +672,7 @@ func (s *PaymentService) QueryAndFinalizeRefund(ctx context.Context, oid int64) 
 		s.writeAuditLog(ctx, oid, "REFUND_QUERY_PENDING", "admin", map[string]any{"refundID": resp.RefundID})
 		return &RefundResult{Success: false, Warning: "gateway refund is still pending confirmation"}, nil
 	default:
-		return s.finalizeRefundFailed(ctx, o, fmt.Errorf("payment refund returned unknown status: %s", strings.TrimSpace(resp.Status)))
+		return s.finalizeRefundFailed(ctx, o, refundNo, fmt.Errorf("payment refund returned unknown status: %s", strings.TrimSpace(resp.Status)))
 	}
 }
 
@@ -613,9 +762,16 @@ func (s *PaymentService) applyRefundFinalDeduction(ctx context.Context, p *Refun
 	return nil
 }
 
-func (s *PaymentService) finalizeRefundFailed(ctx context.Context, o *dbent.PaymentOrder, gErr error) (*RefundResult, error) {
+func (s *PaymentService) finalizeRefundFailed(ctx context.Context, o *dbent.PaymentOrder, refundNo string, gErr error) (*RefundResult, error) {
 	now := time.Now()
 	_, _ = s.entClient.PaymentOrder.UpdateOneID(o.ID).SetStatus(OrderStatusRefundFailed).SetFailedAt(now).SetFailedReason(psErrMsg(gErr)).Save(ctx)
+	if refundNo != "" {
+		// Mark the installment FAILED so it does not stay in flight forever and
+		// block (via the partial unique index) any later refund attempt.
+		if err := s.markRefundLedgerFailed(ctx, paymentServiceRefundClient{s.entClient}, o.ID, refundNo, psErrMsg(gErr), 0, 0, true); err != nil {
+			slog.Error("failed to mark refund ledger failed", "orderID", o.ID, "refundNo", refundNo, "error", err)
+		}
+	}
 	s.writeAuditLog(ctx, o.ID, "REFUND_FAILED", "admin", map[string]any{"detail": psErrMsg(gErr)})
 	return &RefundResult{Success: false, Warning: "gateway refund failed: " + psErrMsg(gErr)}, nil
 }
@@ -623,7 +779,7 @@ func (s *PaymentService) finalizeRefundFailed(ctx context.Context, o *dbent.Paym
 type refundPendingAuditDetail struct {
 	RefundID            string  `json:"refundID"`
 	RefundAmount        float64 `json:"refundAmount"`
-	DeductionRollbackOK bool    `json:"deductionRollbackOK"`
+	DeductionRollbackOk bool    `json:"deductionRollbackOK"`
 }
 
 func (s *PaymentService) latestRefundPendingDetail(ctx context.Context, oid int64) refundPendingAuditDetail {
@@ -632,9 +788,9 @@ func (s *PaymentService) latestRefundPendingDetail(ctx context.Context, oid int6
 		Order(paymentauditlog.ByCreatedAt(sql.OrderDesc())).
 		First(ctx)
 	if err != nil || logEntry == nil {
-		return refundPendingAuditDetail{DeductionRollbackOK: true}
+		return refundPendingAuditDetail{DeductionRollbackOk: true}
 	}
-	detail := refundPendingAuditDetail{DeductionRollbackOK: true}
+	detail := refundPendingAuditDetail{DeductionRollbackOk: true}
 	_ = json.Unmarshal([]byte(logEntry.Detail), &detail)
 	detail.RefundID = strings.TrimSpace(detail.RefundID)
 	return detail
@@ -654,13 +810,30 @@ func (s *PaymentService) getRefundProvider(ctx context.Context, o *dbent.Payment
 }
 
 func (s *PaymentService) handleGwFail(ctx context.Context, p *RefundPlan, gErr error) (*RefundResult, error) {
-	if s.RollbackRefund(ctx, p, gErr) {
+	rollbackOK := s.RollbackRefund(ctx, p, gErr)
+	if rollbackOK {
 		s.restoreStatus(ctx, p)
 		s.writeAuditLog(ctx, p.OrderID, "REFUND_GATEWAY_FAILED", "admin", map[string]any{"detail": psErrMsg(gErr)})
+		if p.RefundNo != "" {
+			// The gateway never accepted this installment and every side effect was
+			// rolled back, so the installment never happened: remove it rather than
+			// leaving a row in flight that would block (via the partial unique index
+			// on active installments) any later refund attempt.
+			if err := s.deleteRefundLedgerRow(ctx, p.OrderID, p.RefundNo); err != nil {
+				slog.Error("failed to delete rolled-back refund ledger row", "orderID", p.OrderID, "refundNo", p.RefundNo, "error", err)
+			}
+		}
 		return &RefundResult{Success: false, Warning: "gateway failed: " + psErrMsg(gErr) + ", rolled back"}, nil
 	}
 	now := time.Now()
 	_, _ = s.entClient.PaymentOrder.UpdateOneID(p.OrderID).SetStatus(OrderStatusRefundFailed).SetFailedAt(now).SetFailedReason(psErrMsg(gErr)).Save(ctx)
+	if p.RefundNo != "" {
+		// Record that the deduction could not be rolled back so a retry knows not
+		// to deduct again (replaces the REFUND_ROLLBACK_FAILED audit existence check).
+		if err := s.markRefundLedgerFailed(ctx, paymentServiceRefundClient{s.entClient}, p.OrderID, p.RefundNo, psErrMsg(gErr), p.BalanceToDeduct, p.SubDaysToDeduct, false); err != nil {
+			slog.Error("failed to mark refund ledger failed", "orderID", p.OrderID, "refundNo", p.RefundNo, "error", err)
+		}
+	}
 	s.writeAuditLog(ctx, p.OrderID, "REFUND_FAILED", "admin", map[string]any{"detail": psErrMsg(gErr)})
 	return nil, infraerrors.InternalServer("REFUND_FAILED", psErrMsg(gErr))
 }
@@ -668,6 +841,11 @@ func (s *PaymentService) handleGwFail(ctx context.Context, p *RefundPlan, gErr e
 func (s *PaymentService) markRefundOk(ctx context.Context, p *RefundPlan) (*RefundResult, error) {
 	fs := refundResultStatus(p)
 	now := time.Now()
+	// Mark the ledger installment SUCCEEDED first: it is what makes the refunded
+	// total correct, so it must never lag behind the order status.
+	if err := s.markRefundLedgerSucceeded(ctx, paymentServiceRefundClient{s.entClient}, p); err != nil {
+		return nil, err
+	}
 	// refund_amount records the cumulative refunded total, which is how the admin
 	// UI reads it (order amount minus refund_amount = refundable remainder).
 	_, err := s.entClient.PaymentOrder.UpdateOneID(p.OrderID).SetStatus(fs).SetRefundAmount(p.RefundedBefore + p.RefundAmount).SetRefundReason(p.Reason).SetRefundAt(now).SetForceRefund(p.Force).Save(ctx)
@@ -682,38 +860,51 @@ func (s *PaymentService) markRefundOk(ctx context.Context, p *RefundPlan) (*Refu
 // REFUNDED once the cumulative refunded amount covers the order, otherwise
 // PARTIALLY_REFUNDED (which stays eligible for another refund).
 func refundResultStatus(p *RefundPlan) string {
-	if p.Order == nil {
+	if p == nil {
 		return OrderStatusPartiallyRefunded
 	}
-	currency := PaymentOrderCurrency(p.Order)
-	tolerance := paymentAmountToleranceForCurrency(currency)
-	if p.RefundedBefore+p.RefundAmount >= p.Order.Amount-tolerance {
-		return OrderStatusRefunded
-	}
-	return OrderStatusPartiallyRefunded
+	return refundedStatusForTotal(p.Order, p.RefundedBefore+p.RefundAmount)
 }
 
 func (s *PaymentService) markRefundOkTx(ctx context.Context, client *dbent.Client, p *RefundPlan) (*RefundResult, error) {
 	fs := refundResultStatus(p)
 	now := time.Now()
+	// The ledger write happens inside the same transaction as the order update, so
+	// a failure here rolls the whole finalization back and can be retried. The
+	// previous implementation wrote an audit row here, which both capped at one
+	// row per (order_id, action) and made a REFUND_PENDING order unfinalizable once
+	// any REFUND_SUCCESS row already existed.
+	if err := s.markRefundLedgerSucceeded(ctx, paymentServiceRefundClient{client}, p); err != nil {
+		return nil, err
+	}
 	// refund_amount records the cumulative refunded total (see markRefundOk).
 	_, err := client.PaymentOrder.UpdateOneID(p.OrderID).SetStatus(fs).SetRefundAmount(p.RefundedBefore + p.RefundAmount).SetRefundReason(p.Reason).SetRefundAt(now).SetForceRefund(p.Force).Save(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("mark refund: %w", err)
 	}
-	detail, err := json.Marshal(map[string]any{"refundAmount": p.RefundAmount, "reason": p.Reason, "balanceDeducted": p.BalanceToDeduct, "force": p.Force})
-	if err != nil {
-		return nil, fmt.Errorf("marshal refund audit: %w", err)
-	}
-	if _, err := client.PaymentAuditLog.Create().
-		SetOrderID(strconv.FormatInt(p.OrderID, 10)).
+	// 审计行只作为人类可读的观测记录；重复写入会因 (order_id, action) 唯一索引
+	// 失败，但那只影响审计展示，不影响台账正确性，因此这里不再让它回滚事务
+	// （旧实现在这里返回错误，导致已有 REFUND_SUCCESS 行的订单永远无法完成退款确认）。
+	if err := client.PaymentAuditLog.Create().
+		SetOrderID(orderIDString(p.OrderID)).
 		SetAction("REFUND_SUCCESS").
-		SetDetail(string(detail)).
+		SetDetail(formatRefundSuccessAuditDetail(p)).
 		SetOperator("admin").
-		Save(ctx); err != nil {
-		return nil, fmt.Errorf("write refund audit: %w", err)
+		OnConflictColumns(paymentauditlog.FieldOrderID, paymentauditlog.FieldAction).
+		DoNothing().
+		Exec(ctx); err != nil {
+		slog.Warn("refund success audit write failed (ledger is authoritative)", "orderID", p.OrderID, "error", err)
 	}
 	return &RefundResult{Success: true, BalanceDeducted: p.BalanceToDeduct, SubDaysDeducted: p.SubDaysToDeduct}, nil
+}
+
+// formatRefundSuccessAuditDetail 渲染 REFUND_SUCCESS 审计行的 detail。
+func formatRefundSuccessAuditDetail(p *RefundPlan) string {
+	detail, err := json.Marshal(map[string]any{"refundAmount": p.RefundAmount, "reason": p.Reason, "balanceDeducted": p.BalanceToDeduct, "force": p.Force})
+	if err != nil {
+		return "{}"
+	}
+	return string(detail)
 }
 
 func (s *PaymentService) markRefundPending(ctx context.Context, p *RefundPlan, resp *payment.RefundResponse) (*RefundResult, error) {
@@ -725,9 +916,16 @@ func (s *PaymentService) markRefundPending(ctx context.Context, p *RefundPlan, r
 		p.SubDaysToDeduct = 0
 	}
 
+	// The ledger is the source of truth for this in-flight installment; make sure a
+	// row exists even for legacy orders whose refund predates the ledger, so the
+	// pending refund can still be queried and finalized later.
+	if err := s.upsertRefundLedgerPending(ctx, p, refundResponseID(resp), rollbackOK); err != nil {
+		return nil, err
+	}
+
 	_, err := s.entClient.PaymentOrder.UpdateOneID(p.OrderID).
 		SetStatus(OrderStatusRefundPending).
-		SetRefundAmount(p.RefundAmount).
+		SetRefundAmount(p.RefundedBefore + p.RefundAmount).
 		SetRefundReason(p.Reason).
 		ClearRefundAt().
 		SetForceRefund(p.Force).
@@ -794,4 +992,62 @@ func (s *PaymentService) restoreStatus(ctx context.Context, p *RefundPlan) {
 		rs = OrderStatusCompleted
 	}
 	_, _ = s.entClient.PaymentOrder.UpdateOneID(p.OrderID).SetStatus(rs).Save(ctx)
+}
+
+// validateRefundRemainder re-reads the already-refunded total from the ledger and
+// rejects a plan whose amount no longer fits the remaining budget.
+//
+// It exists because PrepareRefund and ExecuteRefund are separate calls (the admin
+// HTTP handler does prepare-then-execute), so a plan can go stale between them:
+// another refund may have succeeded in the meantime. The order status CAS in
+// ExecuteRefund serialises the two calls, but it cannot detect that the *amount*
+// was computed before the earlier refund landed — only a fresh read can.
+//
+// Direction is conservative: this can only reject a refund, never enlarge one.
+func (s *PaymentService) validateRefundRemainder(ctx context.Context, p *RefundPlan) error {
+	if p == nil || p.Order == nil {
+		// Nothing to validate against; skip rather than invent a failure.
+		return nil
+	}
+	tolerance := paymentAmountToleranceForCurrency(PaymentOrderCurrency(p.Order))
+	refunded, err := s.refundSucceededTotal(ctx, p.Order)
+	if err != nil {
+		return infraerrors.InternalServer("REFUND_LOOKUP_FAILED", "failed to compute already refunded amount")
+	}
+	remaining := p.Order.Amount - refunded
+	if p.RefundAmount-remaining > tolerance {
+		return infraerrors.BadRequest("REFUND_AMOUNT_EXCEEDED", "refund amount exceeds the refundable remainder").
+			WithMetadata(map[string]string{"remaining": fmt.Sprintf("%.2f", remaining)})
+	}
+	// Carry the freshly read total forward so the terminal status decision
+	// (refundResultStatus) and the cumulative refund_amount write both use it
+	// instead of the value captured during PrepareRefund.
+	p.RefundedBefore = refunded
+	return nil
+}
+
+// restoreStatusFromLedger releases an order from the REFUNDING pin, deriving the
+// status from the durable refund ledger rather than from the caller's snapshot.
+//
+// restoreStatus cannot be used on the rejection path: by the time a refund plan is
+// rejected as stale, another refund may already have succeeded, so the plan's
+// snapshot still says COMPLETED while the ledger says part of the order is gone.
+// Reporting COMPLETED there would erase a real partial-refund outcome and let the
+// whole order be refunded again. The ledger is the only authority for that.
+func (s *PaymentService) restoreStatusFromLedger(ctx context.Context, p *RefundPlan) {
+	if p == nil {
+		return
+	}
+	status := OrderStatusCompleted
+	if p.Order != nil {
+		if refunded, err := s.refundSucceededTotal(ctx, p.Order); err == nil {
+			status = refundedStatusForTotal(p.Order, refunded)
+		} else {
+			// Unknown ledger state: the order must not look fully refundable again.
+			status = OrderStatusPartiallyRefunded
+		}
+	}
+	if _, err := s.entClient.PaymentOrder.UpdateOneID(p.OrderID).SetStatus(status).Save(ctx); err != nil {
+		slog.Error("[PaymentService] failed to release order from REFUNDING", "orderID", p.OrderID, "status", status, "error", err)
+	}
 }

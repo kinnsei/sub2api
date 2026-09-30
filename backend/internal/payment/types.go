@@ -182,6 +182,12 @@ type RefundRequest struct {
 	OrderID string
 	Amount  string // Refund amount formatted to 2 decimal places
 	Reason  string
+	// RefundNo optionally carries the caller-persisted refund reference
+	// (Alipay out_request_no). Callers should pass the value they stored when
+	// the refund was first requested so retries and later status queries reuse
+	// the same reference. Providers that derive their own idempotent reference
+	// fall back to doing so when this is empty.
+	RefundNo string
 }
 
 // RefundQueryRequest contains identifiers needed to query a previously
