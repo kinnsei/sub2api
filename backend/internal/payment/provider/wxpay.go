@@ -34,6 +34,7 @@ const (
 
 const (
 	wxpayMetadataAppID      = "appid"
+	wxpayMetadataMPAppID    = "mp_appid"
 	wxpayMetadataMerchantID = "mchid"
 	wxpayMetadataCurrency   = "currency"
 	wxpayMetadataTradeState = "trade_state"
@@ -126,6 +127,43 @@ func ResolveWxpayJSAPIAppID(config map[string]string) string {
 		return appID
 	}
 	return strings.TrimSpace(config["appId"])
+}
+
+// MerchantIdentityMetadata reports the merchant identity that WeChat Pay
+// notifications for this instance carry.
+//
+// WeChat's *_prepay_* endpoints return the AppID that was used for the
+// transaction, and the notification echoes it back. When a dedicated MP AppID
+// is configured the JSAPI flow settles under that AppID, so reporting only the
+// base merchant AppID here would make every JSAPI refund fail the snapshot
+// identity check with "wxpay appid mismatch". Returning the configured MP AppID
+// as well lets the refund path match whichever of the two the order used.
+//
+// Two keys are therefore reported:
+//   - "appid"        the base merchant AppID
+//   - "mp_appid"     the dedicated JSAPI MP AppID, when configured
+//
+// The settlement currency is included because WeChat Pay only settles in CNY and
+// the refund-path validator compares the stored snapshot currency against it.
+func (w *Wxpay) MerchantIdentityMetadata() map[string]string {
+	if w == nil {
+		return nil
+	}
+	metadata := map[string]string{}
+	if appID := strings.TrimSpace(w.config["appId"]); appID != "" {
+		metadata[wxpayMetadataAppID] = appID
+	}
+	if mpAppID := strings.TrimSpace(w.config["mpAppId"]); mpAppID != "" {
+		metadata[wxpayMetadataMPAppID] = mpAppID
+	}
+	if merchantID := strings.TrimSpace(w.config["mchId"]); merchantID != "" {
+		metadata[wxpayMetadataMerchantID] = merchantID
+	}
+	if len(metadata) == 0 {
+		return nil
+	}
+	metadata[wxpayMetadataCurrency] = wxpayCurrency
+	return metadata
 }
 
 func formatPEM(key, keyType string) string {
@@ -470,7 +508,7 @@ func (w *Wxpay) Refund(ctx context.Context, req payment.RefundRequest) (*payment
 	}
 	rs := refunddomestic.RefundsApiService{Client: c}
 	cur := wxpayCurrency
-	outRefundNo := wxpayRefundID(req.OrderID, req.Amount)
+	outRefundNo := wxpayRefundReference(req.OrderID, req.Amount, req.RefundNo)
 	res, _, err := rs.Create(ctx, refunddomestic.CreateRequest{
 		OutTradeNo:  core.String(req.OrderID),
 		OutRefundNo: core.String(outRefundNo),
@@ -520,6 +558,25 @@ func (w *Wxpay) QueryRefund(ctx context.Context, req payment.RefundQueryRequest)
 	return &payment.RefundResponse{RefundID: outRefundNo, Status: status}, nil
 }
 
+// wxpayRefundReference derives the out_refund_no used as WeChat Pay's idempotency
+// key for a refund.
+//
+// It must distinguish separate refund installments: keying on (order, amount) made
+// two legitimate partial refunds of the same size reuse one out_refund_no, so
+// WeChat treated the second as a duplicate of the first instead of refunding again
+// while the caller recorded a second success. refundNo is the caller-persisted
+// per-installment reference, so it is preferred; the (order, amount) form remains
+// only as a fallback for callers that supply no reference.
+//
+// WeChat restricts out_refund_no to letters, digits and a few separators, so the
+// persisted reference (alphanumeric by construction) is passed through as-is.
+func wxpayRefundReference(orderID, amount, refundNo string) string {
+	if ref := strings.TrimSpace(refundNo); ref != "" {
+		return ref
+	}
+	return wxpayRefundID(orderID, amount)
+}
+
 func wxpayRefundID(orderID, amount string) string {
 	orderID = strings.TrimSpace(orderID)
 	if orderID == "" {
@@ -563,6 +620,7 @@ func (w *Wxpay) CancelPayment(ctx context.Context, tradeNo string) error {
 }
 
 var (
-	_ payment.Provider           = (*Wxpay)(nil)
-	_ payment.CancelableProvider = (*Wxpay)(nil)
+	_ payment.Provider                 = (*Wxpay)(nil)
+	_ payment.CancelableProvider       = (*Wxpay)(nil)
+	_ payment.MerchantIdentityProvider = (*Wxpay)(nil)
 )

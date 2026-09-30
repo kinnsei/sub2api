@@ -234,7 +234,14 @@ func (s *Stripe) Refund(ctx context.Context, req payment.RefundRequest) (*paymen
 		Amount:        stripe.Int64(amountInMinorUnit),
 		Reason:        stripe.String(string(stripe.RefundReasonRequestedByCustomer)),
 	}
-	params.SetIdempotencyKey(fmt.Sprintf("re-%s-%d", req.OrderID, amountInMinorUnit))
+	// The idempotency key must identify the *installment*, not just the amount.
+	// Keying on (order, amount) made two legitimate partial refunds of the same
+	// size collide: the second Create returned the first refund's cached response
+	// without moving any money, while the caller recorded a second successful
+	// refund. The caller persists a per-installment RefundNo that is stable across
+	// retries, so use it when present and only fall back to (order, amount) for
+	// callers that do not supply one.
+	params.SetIdempotencyKey(stripeRefundIdempotencyKey(req.OrderID, amountInMinorUnit, req.RefundNo))
 	params.Context = ctx
 
 	r, err := s.sc.V1Refunds.Create(ctx, params)
@@ -356,3 +363,17 @@ var (
 	_ payment.MerchantIdentityProvider = (*Stripe)(nil)
 	_ payment.TradeNoRefundProvider    = (*Stripe)(nil)
 )
+
+// stripeRefundIdempotencyKey derives the idempotency key for a refund request.
+//
+// The key must distinguish separate refund installments, otherwise Stripe returns
+// the earlier refund's cached response for a later, genuinely new refund and no
+// money moves while the caller records success. refundNo is the caller-persisted
+// per-installment reference, so it is preferred; the (order, amount) form is kept
+// only for callers that supply no reference.
+func stripeRefundIdempotencyKey(orderID string, amountInMinorUnit int64, refundNo string) string {
+	if ref := strings.TrimSpace(refundNo); ref != "" {
+		return "re-" + ref
+	}
+	return fmt.Sprintf("re-%s-%d", orderID, amountInMinorUnit)
+}

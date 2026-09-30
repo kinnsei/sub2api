@@ -278,7 +278,7 @@ func (a *Airwallex) Refund(ctx context.Context, req payment.RefundRequest) (*pay
 	}
 
 	payload := airwallexCreateRefundRequest{
-		RequestID:       airwallexDeterministicRequestID("refund", intentID, req.Amount),
+		RequestID:       airwallexRefundRequestID(intentID, req.Amount, req.RefundNo),
 		PaymentIntentID: intentID,
 		Amount:          newAirwallexRequestAmount(amount),
 		Reason:          strings.TrimSpace(req.Reason),
@@ -661,3 +661,18 @@ var (
 	_ payment.MerchantIdentityProvider = (*Airwallex)(nil)
 	_ payment.TradeNoRefundProvider    = (*Airwallex)(nil)
 )
+
+// airwallexRefundRequestID derives the request_id used as Airwallex's idempotency
+// key for a refund.
+//
+// It must distinguish separate refund installments: keying on (intent, amount)
+// made two legitimate partial refunds of the same size collide, so the second call
+// returned the first refund instead of moving money while the caller recorded a
+// second success. refundNo is the caller-persisted per-installment reference, so
+// it is preferred; the (intent, amount) form remains only as a fallback.
+func airwallexRefundRequestID(intentID, amount, refundNo string) string {
+	if ref := strings.TrimSpace(refundNo); ref != "" {
+		return airwallexDeterministicRequestID("refund", ref)
+	}
+	return airwallexDeterministicRequestID("refund", intentID, amount)
+}
