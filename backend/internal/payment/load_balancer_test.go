@@ -108,15 +108,15 @@ func TestGetInstanceChannelLimitsFallsBackToLegacyDirectAliases(t *testing.T) {
 	t.Parallel()
 
 	inst := testInstance(1, TypeAlipay, makeLimitsJSON(TypeAlipayDirect, ChannelLimits{SingleMax: 66}))
-	got := getInstanceChannelLimits(inst, TypeAlipay)
-	if got.SingleMax != 66 {
-		t.Fatalf("getInstanceChannelLimits() = %+v, want SingleMax=66", got)
+	got, ok := getInstanceChannelLimits(inst, TypeAlipay)
+	if !ok || got.SingleMax != 66 {
+		t.Fatalf("getInstanceChannelLimits() = %+v ok=%v, want SingleMax=66 ok=true", got, ok)
 	}
 
 	wxInst := testInstance(2, TypeWxpay, makeLimitsJSON(TypeWxpayDirect, ChannelLimits{SingleMin: 8}))
-	wxGot := getInstanceChannelLimits(wxInst, TypeWxpay)
-	if wxGot.SingleMin != 8 {
-		t.Fatalf("getInstanceChannelLimits() = %+v, want SingleMin=8", wxGot)
+	wxGot, ok := getInstanceChannelLimits(wxInst, TypeWxpay)
+	if !ok || wxGot.SingleMin != 8 {
+		t.Fatalf("getInstanceChannelLimits() = %+v ok=%v, want SingleMin=8 ok=true", wxGot, ok)
 	}
 }
 
@@ -270,6 +270,25 @@ func TestFilterByLimits(t *testing.T) {
 			wantIDs:     nil,
 		},
 		{
+			name: "unreadable limits exclude the instance instead of unlocking it",
+			candidates: []instanceCandidate{
+				{inst: testInstance(1, "easypay", "not-json{"), dailyUsed: 0},
+			},
+			paymentType: "alipay",
+			orderAmount: 100,
+			wantIDs:     nil,
+		},
+		{
+			name: "unreadable limits on one instance still allow a healthy sibling",
+			candidates: []instanceCandidate{
+				{inst: testInstance(1, "easypay", "not-json{"), dailyUsed: 0},
+				{inst: testInstance(2, "easypay", makeLimitsJSON("alipay", ChannelLimits{SingleMax: 500})), dailyUsed: 0},
+			},
+			paymentType: "alipay",
+			orderAmount: 100,
+			wantIDs:     []int64{2},
+		},
+		{
 			name:        "empty candidates returns empty",
 			candidates:  nil,
 			paymentType: "alipay",
@@ -363,18 +382,21 @@ func TestGetInstanceChannelLimits(t *testing.T) {
 		inst        *dbent.PaymentProviderInstance
 		paymentType PaymentType
 		want        ChannelLimits
+		wantOK      bool
 	}{
 		{
 			name:        "empty limits string returns zero ChannelLimits",
 			inst:        testInstance(1, "easypay", ""),
 			paymentType: "alipay",
 			want:        ChannelLimits{},
+			wantOK:      true,
 		},
 		{
-			name:        "invalid JSON returns zero ChannelLimits",
+			name:        "invalid JSON fails closed instead of unlocking the instance",
 			inst:        testInstance(1, "easypay", "not-json{"),
 			paymentType: "alipay",
 			want:        ChannelLimits{},
+			wantOK:      false,
 		},
 		{
 			name: "valid JSON with matching payment type",
@@ -382,6 +404,7 @@ func TestGetInstanceChannelLimits(t *testing.T) {
 				`{"alipay":{"singleMin":5,"singleMax":200,"dailyLimit":1000}}`),
 			paymentType: "alipay",
 			want:        ChannelLimits{SingleMin: 5, SingleMax: 200, DailyLimit: 1000},
+			wantOK:      true,
 		},
 		{
 			name: "payment type not in limits returns zero ChannelLimits",
@@ -389,6 +412,7 @@ func TestGetInstanceChannelLimits(t *testing.T) {
 				`{"alipay":{"singleMin":5,"singleMax":200}}`),
 			paymentType: "wxpay",
 			want:        ChannelLimits{},
+			wantOK:      true,
 		},
 		{
 			name: "stripe provider uses stripe lookup key regardless of payment type",
@@ -396,6 +420,7 @@ func TestGetInstanceChannelLimits(t *testing.T) {
 				`{"stripe":{"singleMin":10,"singleMax":500,"dailyLimit":5000}}`),
 			paymentType: "alipay",
 			want:        ChannelLimits{SingleMin: 10, SingleMax: 500, DailyLimit: 5000},
+			wantOK:      true,
 		},
 		{
 			name: "stripe provider ignores payment type key even if present",
@@ -403,6 +428,7 @@ func TestGetInstanceChannelLimits(t *testing.T) {
 				`{"stripe":{"singleMin":10,"singleMax":500},"alipay":{"singleMin":1,"singleMax":100}}`),
 			paymentType: "alipay",
 			want:        ChannelLimits{SingleMin: 10, SingleMax: 500},
+			wantOK:      true,
 		},
 		{
 			name: "non-stripe provider uses payment type as lookup key",
@@ -410,6 +436,7 @@ func TestGetInstanceChannelLimits(t *testing.T) {
 				`{"alipay":{"singleMin":5},"wxpay":{"singleMin":10}}`),
 			paymentType: "wxpay",
 			want:        ChannelLimits{SingleMin: 10},
+			wantOK:      true,
 		},
 		{
 			name: "valid JSON with partial limits (only dailyLimit)",
@@ -417,15 +444,19 @@ func TestGetInstanceChannelLimits(t *testing.T) {
 				`{"alipay":{"dailyLimit":800}}`),
 			paymentType: "alipay",
 			want:        ChannelLimits{DailyLimit: 800},
+			wantOK:      true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := getInstanceChannelLimits(tt.inst, tt.paymentType)
+			got, ok := getInstanceChannelLimits(tt.inst, tt.paymentType)
 			if got != tt.want {
 				t.Fatalf("getInstanceChannelLimits() = %+v, want %+v", got, tt.want)
+			}
+			if ok != tt.wantOK {
+				t.Fatalf("getInstanceChannelLimits() ok = %v, want %v", ok, tt.wantOK)
 			}
 		})
 	}
@@ -652,6 +683,56 @@ func TestSelectInstanceAllCandidatesOverLimit(t *testing.T) {
 	}
 	if sel != nil {
 		t.Fatalf("SelectInstance returned selection %+v, want nil on limits error", sel)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sqlmock expectations: %v", err)
+	}
+}
+
+// A malformed limits value must never make an instance selectable: the operator
+// configured caps, we just cannot read them, so routing would silently exceed
+// whatever those caps are.
+func TestSelectInstanceExcludesUnreadableLimits(t *testing.T) {
+	t.Parallel()
+
+	lb, mock := newSelectInstanceTestLB(t)
+	rows := addInstanceRecord(instanceRecordRows(), 1, TypeAlipay, TypeAlipay, "not-json{")
+	mock.ExpectQuery(`FROM "payment_provider_instances"`).WillReturnRows(rows)
+	mock.ExpectQuery(`FROM "payment_orders"`).
+		WillReturnRows(sqlmock.NewRows([]string{"provider_instance_id", "sum"}))
+
+	sel, err := lb.SelectInstance(context.Background(), "", TypeAlipay, StrategyRoundRobin, 50)
+	if err == nil {
+		t.Fatalf("SelectInstance returned selection %+v, want ErrInstanceLimitsExceeded", sel)
+	}
+	if !errors.Is(err, ErrInstanceLimitsExceeded) {
+		t.Fatalf("SelectInstance error = %v, want it to wrap ErrInstanceLimitsExceeded", err)
+	}
+	if sel != nil {
+		t.Fatalf("SelectInstance returned selection %+v, want nil", sel)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sqlmock expectations: %v", err)
+	}
+}
+
+// A readable sibling must still be usable when another instance is unreadable.
+func TestSelectInstanceUsesReadableSiblingWhenOneInstanceUnreadable(t *testing.T) {
+	t.Parallel()
+
+	lb, mock := newSelectInstanceTestLB(t)
+	rows := addInstanceRecord(instanceRecordRows(), 1, TypeAlipay, TypeAlipay, "not-json{")
+	rows = addInstanceRecord(rows, 2, TypeAlipay, TypeAlipay, makeLimitsJSON(TypeAlipay, ChannelLimits{SingleMax: 500}))
+	mock.ExpectQuery(`FROM "payment_provider_instances"`).WillReturnRows(rows)
+	mock.ExpectQuery(`FROM "payment_orders"`).
+		WillReturnRows(sqlmock.NewRows([]string{"provider_instance_id", "sum"}))
+
+	sel, err := lb.SelectInstance(context.Background(), "", TypeAlipay, StrategyRoundRobin, 50)
+	if err != nil {
+		t.Fatalf("SelectInstance returned error %v, want the readable instance 2", err)
+	}
+	if sel == nil || sel.InstanceID != "2" {
+		t.Fatalf("SelectInstance = %+v, want instance 2", sel)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet sqlmock expectations: %v", err)

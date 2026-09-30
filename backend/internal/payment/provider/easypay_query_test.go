@@ -20,6 +20,7 @@ func TestEasyPayQueryOrderStatusMapping(t *testing.T) {
 		wantStatus  string
 		wantTradeNo string
 		wantAmount  float64
+		wantErr     bool
 	}{
 		{
 			name:        "top level trade success is paid",
@@ -64,16 +65,28 @@ func TestEasyPayQueryOrderStatusMapping(t *testing.T) {
 			wantAmount:  3.21,
 		},
 		{
-			name:        "query failure with missing status is pending",
+			// Previously asserted as "pending": the response code was never
+			// inspected, so an order that does not exist upstream looked exactly
+			// like an order that is simply not paid yet.
+			name:        "missing order maps to failed",
 			body:        `{"code":0,"msg":"订单不存在"}`,
-			wantStatus:  payment.ProviderStatusPending,
+			wantStatus:  payment.ProviderStatusFailed,
 			wantTradeNo: orderID,
 		},
 		{
-			name:        "missing fields are pending",
-			body:        `{}`,
-			wantStatus:  payment.ProviderStatusPending,
-			wantTradeNo: orderID,
+			// A rejection that is not a not-found must not be reported as a state:
+			// callers treat "pending" as "known not paid" and would cancel/expire
+			// the order. Returning an error makes them fail closed instead.
+			name:    "rejected query without a not-found message is an error",
+			body:    `{"code":0,"msg":"sign error"}`,
+			wantErr: true,
+		},
+		{
+			// An empty body is equally unverifiable, so it must not be read as
+			// "not paid" either.
+			name:    "empty object is an error rather than not paid",
+			body:    `{}`,
+			wantErr: true,
 		},
 	}
 
@@ -104,6 +117,12 @@ func TestEasyPayQueryOrderStatusMapping(t *testing.T) {
 
 			provider := newTestEasyPay(t, server.URL)
 			resp, err := provider.QueryOrder(context.Background(), orderID)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("QueryOrder returned status %q, want an error (response=%+v)", resp.Status, resp)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatalf("QueryOrder returned error: %v", err)
 			}

@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"strings"
@@ -424,11 +425,16 @@ func (h *PaymentHandler) RequestRefund(c *gin.Context) {
 		return
 	}
 
-	if err := h.paymentService.RequestRefund(c.Request.Context(), orderID, subject.UserID, req.Reason); err != nil {
-		response.ErrorFrom(c, err)
-		return
-	}
-	response.Success(c, gin.H{"message": "refund requested"})
+	// Submitting a refund request is a write with a user-visible side effect, so it
+	// is idempotent: a duplicate submit (double-click, retry after a timeout) must
+	// replay the stored response instead of racing the order status CAS and
+	// surfacing a spurious conflict.
+	executeUserIdempotentJSON(c, "payment.refund_request", req, service.DefaultWriteIdempotencyTTL(), func(ctx context.Context) (any, error) {
+		if err := h.paymentService.RequestRefund(ctx, orderID, subject.UserID, req.Reason); err != nil {
+			return nil, err
+		}
+		return gin.H{"message": "refund requested"}, nil
+	})
 }
 
 // GetRefundEligibleProviders returns provider instance IDs that allow user refund.

@@ -334,6 +334,23 @@ func (e *EasyPay) QueryOrder(ctx context.Context, tradeNo string) (*payment.Quer
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return nil, fmt.Errorf("easypay parse query: %w", err)
 	}
+	// The response code must be inspected first: without it, a rejected query
+	// ({"code":0,"msg":"order not found"}) is indistinguishable from "not paid yet",
+	// so callers kept polling an order that does not exist upstream.
+	if !easyPayResponseCodeIsSuccess(resp.Code) {
+		msg := strings.TrimSpace(resp.Msg)
+		if msg == "" {
+			msg = summarizeEasyPayResponse(body)
+		}
+		if easyPayMessageIndicatesMissingOrder(msg) {
+			return &payment.QueryOrderResponse{
+				TradeNo:  tradeNo,
+				Status:   payment.ProviderStatusFailed,
+				Metadata: e.MerchantIdentityMetadata(),
+			}, nil
+		}
+		return nil, fmt.Errorf("easypay query failed: %s", msg)
+	}
 	status := payment.ProviderStatusPending
 	if resp.TradeStatus != nil {
 		if *resp.TradeStatus == tradeStatusSuccess {
@@ -513,8 +530,28 @@ func parseEasyPayRefundResponse(status int, body []byte) error {
 	return nil
 }
 
+// easyPayMessageIndicatesMissingOrder reports whether a non-success response means
+// "no such order" rather than a transient failure. EasyPay does not document a
+// stable error code for this, so match its wording case-insensitively and keep the
+// check loose: a false negative only turns "order missing" back into a query error,
+// which callers already treat as "keep the order pending".
+func easyPayMessageIndicatesMissingOrder(msg string) bool {
+	msg = strings.ToLower(strings.TrimSpace(msg))
+	if msg == "" {
+		return false
+	}
+	for _, marker := range []string{"not exist", "不存在", "no order", "order not found"} {
+		if strings.Contains(msg, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 func easyPayResponseCodeIsSuccess(code any) bool {
 	switch v := code.(type) {
+	case int:
+		return v == easypayCodeSuccess
 	case float64:
 		return int(v) == easypayCodeSuccess
 	case string:

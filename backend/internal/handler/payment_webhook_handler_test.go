@@ -178,6 +178,48 @@ func TestExtractOutTradeNo(t *testing.T) {
 			rawBody:     `{"name":"payment_intent.succeeded","data":{"object":{"merchant_order_id":"sub2_awx_123"}}}`,
 			want:        "sub2_awx_123",
 		},
+		{
+			name:        "stripe payment_intent.succeeded payload",
+			providerKey: payment.TypeStripe,
+			rawBody:     `{"id":"evt_1","type":"payment_intent.succeeded","data":{"object":{"id":"pi_1","metadata":{"orderId":"sub2_stripe_123"}}}}`,
+			want:        "sub2_stripe_123",
+		},
+		{
+			name:        "stripe payload without metadata",
+			providerKey: payment.TypeStripe,
+			rawBody:     `{"id":"evt_1","type":"payment_intent.succeeded","data":{"object":{"id":"pi_1"}}}`,
+			want:        "",
+		},
+		{
+			name:        "stripe payload with empty orderId",
+			providerKey: payment.TypeStripe,
+			rawBody:     `{"data":{"object":{"metadata":{"orderId":"   "}}}}`,
+			want:        "",
+		},
+		{
+			name:        "stripe payload with non-string orderId",
+			providerKey: payment.TypeStripe,
+			rawBody:     `{"data":{"object":{"metadata":{"orderId":{"nested":"value"}}}}}`,
+			want:        "",
+		},
+		{
+			name:        "stripe form-encoded body",
+			providerKey: payment.TypeStripe,
+			rawBody:     "out_trade_no=sub2_stripe_456",
+			want:        "",
+		},
+		{
+			name:        "stripe truncated json body",
+			providerKey: payment.TypeStripe,
+			rawBody:     `{"data":{"object":{"metadata":{"orderId":"sub2_str`,
+			want:        "",
+		},
+		{
+			name:        "stripe empty body",
+			providerKey: payment.TypeStripe,
+			rawBody:     "",
+			want:        "",
+		},
 	}
 
 	for _, tt := range tests {

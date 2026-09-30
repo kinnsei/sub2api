@@ -237,7 +237,15 @@ func (lb *DefaultLoadBalancer) attachDailyUsage(
 func filterByLimits(candidates []instanceCandidate, paymentType PaymentType, orderAmount float64) []instanceCandidate {
 	var result []instanceCandidate
 	for _, c := range candidates {
-		cl := getInstanceChannelLimits(c.inst, paymentType)
+		cl, readable := getInstanceChannelLimits(c.inst, paymentType)
+		if !readable {
+			// Unreadable limits must fail closed: the exact caps are unknown, so
+			// treating them as unlimited would let the order exceed whatever the
+			// operator configured.
+			slog.Error("skipping instance with unreadable limits",
+				"instance_id", c.inst.ID, "payment_type", paymentType)
+			continue
+		}
 
 		if cl.SingleMin > 0 && orderAmount < cl.SingleMin {
 			slog.Info("order below instance single min, skipping",
@@ -261,14 +269,26 @@ func filterByLimits(candidates []instanceCandidate, paymentType PaymentType, ord
 	return result
 }
 
-// getInstanceChannelLimits returns the channel limits for a specific payment type.
-func getInstanceChannelLimits(inst *dbent.PaymentProviderInstance, paymentType PaymentType) ChannelLimits {
-	if inst.Limits == "" {
-		return ChannelLimits{}
+// getInstanceChannelLimits returns the channel limits for a specific payment
+// type. The second return value reports whether the instance's stored limits
+// could be read at all.
+//
+// An empty limits string and a missing payment-type key are legitimate "no
+// limits configured" states and stay unlimited. Unparseable JSON is not: the
+// stored value is the only record of the operator's caps, so an unreadable set
+// must exclude the instance instead of silently unlocking it.
+func getInstanceChannelLimits(inst *dbent.PaymentProviderInstance, paymentType PaymentType) (ChannelLimits, bool) {
+	if inst == nil || inst.Limits == "" {
+		return ChannelLimits{}, true
 	}
 	var limits InstanceLimits
 	if err := json.Unmarshal([]byte(inst.Limits), &limits); err != nil {
-		return ChannelLimits{}
+		slog.Error("payment provider instance limits unreadable, excluding instance from selection",
+			"instance_id", inst.ID,
+			"provider_key", inst.ProviderKey,
+			"payment_type", paymentType,
+			"error", err)
+		return ChannelLimits{}, false
 	}
 	// For Stripe, limits are stored under the provider key "stripe".
 	lookupKey := paymentType
@@ -276,14 +296,14 @@ func getInstanceChannelLimits(inst *dbent.PaymentProviderInstance, paymentType P
 		lookupKey = "stripe"
 	}
 	if cl, ok := limits[lookupKey]; ok {
-		return cl
+		return cl, true
 	}
 	if aliasKey := legacyVisibleMethodAlias(lookupKey); aliasKey != "" {
 		if cl, ok := limits[aliasKey]; ok {
-			return cl
+			return cl, true
 		}
 	}
-	return ChannelLimits{}
+	return ChannelLimits{}, true
 }
 
 // pickByStrategy selects one instance from the available candidates.

@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"context"
 	"strconv"
 	"time"
 
@@ -239,22 +240,20 @@ func (h *PaymentHandler) ProcessRefund(c *gin.Context) {
 		return
 	}
 
-	plan, earlyResult, err := h.paymentService.PrepareRefund(c.Request.Context(), orderID, req.Amount, req.Reason, req.Force, req.DeductBalance)
-	if err != nil {
-		response.ErrorFrom(c, err)
-		return
-	}
-	if earlyResult != nil {
-		response.Success(c, earlyResult)
-		return
-	}
-
-	result, err := h.paymentService.ExecuteRefund(c.Request.Context(), plan)
-	if err != nil {
-		response.ErrorFrom(c, err)
-		return
-	}
-	response.Success(c, result)
+	// A refund is a money-moving write, so it is retried idempotently: a duplicated
+	// request (double-click, client retry after a timeout) must replay the stored
+	// result instead of paying the gateway twice. The whole prepare+execute pair
+	// runs inside the idempotent execution so a replay cannot re-run either half.
+	executeAdminIdempotentJSON(c, "admin.payment.refund", req, service.DefaultWriteIdempotencyTTL(), func(ctx context.Context) (any, error) {
+		plan, earlyResult, err := h.paymentService.PrepareRefund(ctx, orderID, req.Amount, req.Reason, req.Force, req.DeductBalance)
+		if err != nil {
+			return nil, err
+		}
+		if earlyResult != nil {
+			return earlyResult, nil
+		}
+		return h.paymentService.ExecuteRefund(ctx, plan)
+	})
 }
 
 // QueryAndFinalizeRefund queries the provider refund status and finalizes a pending refund.

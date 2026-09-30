@@ -2,15 +2,22 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/payment"
 	"github.com/smartwalle/alipay/v3"
 )
+
+// alipayHTTPTimeout bounds every gateway call. The SDK defaults the client to
+// http.DefaultClient, which has no timeout at all.
+const alipayHTTPTimeout = 15 * time.Second
 
 // Alipay product codes.
 const (
@@ -74,7 +81,15 @@ func (a *Alipay) getClient() (*alipay.Client, error) {
 	if a.client != nil {
 		return a.client, nil
 	}
-	client, err := alipay.New(a.config["appId"], a.config["privateKey"], true)
+	client, err := alipay.New(
+		a.config["appId"],
+		a.config["privateKey"],
+		true,
+		alipay.WithHTTPClient(&http.Client{
+			Timeout:   alipayHTTPTimeout,
+			Transport: http.DefaultTransport,
+		}),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("alipay init client: %w", err)
 	}
@@ -247,33 +262,54 @@ func (a *Alipay) QueryOrder(ctx context.Context, tradeNo string) (*payment.Query
 	result, err := client.TradeQuery(ctx, alipay.TradeQuery{OutTradeNo: tradeNo})
 	if err != nil {
 		if isTradeNotExist(err) {
+			// Alipay does not know this trade. That is "not paid yet", not a
+			// hard failure, and the caller dereferences the response.
 			return &payment.QueryOrderResponse{
-				TradeNo: tradeNo,
-				Status:  payment.ProviderStatusPending,
+				TradeNo:  tradeNo,
+				Status:   payment.ProviderStatusPending,
+				Metadata: a.MerchantIdentityMetadata(),
 			}, nil
 		}
 		return nil, fmt.Errorf("alipay TradeQuery: %w", err)
 	}
+	if result == nil {
+		return nil, fmt.Errorf("alipay TradeQuery: empty response")
+	}
 
 	status := payment.ProviderStatusPending
+	statusKnown := false
 	switch result.TradeStatus {
 	case alipay.TradeStatusSuccess, alipay.TradeStatusFinished:
 		status = payment.ProviderStatusPaid
+		statusKnown = true
 	case alipay.TradeStatusClosed:
 		status = payment.ProviderStatusFailed
+		statusKnown = true
 	}
 
-	amount, err := strconv.ParseFloat(result.TotalAmount, 64)
-	if err != nil {
-		amount, err = parseAlipayAmount(
+	amount, amountErr := strconv.ParseFloat(strings.TrimSpace(result.TotalAmount), 64)
+	if amountErr != nil {
+		amount, amountErr = parseAlipayAmount(
 			result.TotalAmount,
 			result.ReceiptAmount,
 			result.BuyerPayAmount,
 			result.InvoiceAmount,
 		)
-		if err != nil {
-			return nil, fmt.Errorf("alipay parse amount: %w", err)
+	}
+	if amountErr != nil {
+		if !statusKnown {
+			// Alipay answers a query for a trade it never created with code 40004
+			// and an otherwise empty body: no trade_status and no amount fields.
+			// That is "not paid yet", not a parse failure. A trade that does carry
+			// a real status (success/closed) must still surface the error rather
+			// than be silently downgraded to pending.
+			return &payment.QueryOrderResponse{
+				TradeNo:  tradeNo,
+				Status:   payment.ProviderStatusPending,
+				Metadata: a.MerchantIdentityMetadata(),
+			}, nil
 		}
+		return nil, fmt.Errorf("alipay parse amount: %w", amountErr)
 	}
 
 	return &payment.QueryOrderResponse{
@@ -301,13 +337,16 @@ func (a *Alipay) VerifyNotification(ctx context.Context, rawBody string, _ map[s
 	if err != nil {
 		return nil, fmt.Errorf("alipay verify notification: %w", err)
 	}
+	if notification == nil {
+		return nil, fmt.Errorf("alipay verify notification: empty notification")
+	}
 
 	status := payment.ProviderStatusFailed
 	if notification.TradeStatus == alipay.TradeStatusSuccess || notification.TradeStatus == alipay.TradeStatusFinished {
 		status = payment.ProviderStatusSuccess
 	}
 
-	amount, err := strconv.ParseFloat(notification.TotalAmount, 64)
+	amount, err := strconv.ParseFloat(strings.TrimSpace(notification.TotalAmount), 64)
 	if err != nil {
 		amount, err = parseAlipayAmount(
 			notification.TotalAmount,
@@ -348,7 +387,12 @@ func (a *Alipay) Refund(ctx context.Context, req payment.RefundRequest) (*paymen
 		return nil, err
 	}
 
-	outRequestNo := alipayRefundRequestNo(req.OrderID, req.Amount)
+	// An explicit refund number wins: it is the value the caller persisted when
+	// it first asked for this refund, so reuse it for idempotency and lookups.
+	outRequestNo := strings.TrimSpace(req.RefundNo)
+	if outRequestNo == "" {
+		outRequestNo = alipayRefundRequestNo(req.OrderID, req.Amount)
+	}
 	result, err := alipayTradeRefund(ctx, client, alipay.TradeRefund{
 		OutTradeNo:   req.OrderID,
 		RefundAmount: req.Amount,
@@ -357,6 +401,15 @@ func (a *Alipay) Refund(ctx context.Context, req payment.RefundRequest) (*paymen
 	})
 	if err != nil {
 		return nil, fmt.Errorf("alipay TradeRefund: %w", err)
+	}
+	if result == nil {
+		return nil, fmt.Errorf("alipay TradeRefund: empty response")
+	}
+	// A business failure (bad amount, trade already refunded, ...) arrives as a
+	// nil Go error with a non-success code. Reporting it as "pending" would make
+	// the caller record a refund that never reached the gateway.
+	if result.IsFailure() {
+		return nil, fmt.Errorf("alipay TradeRefund failed: %s", result.Error.Error())
 	}
 
 	refundStatus := payment.ProviderStatusPending
@@ -395,9 +448,18 @@ func (a *Alipay) QueryRefund(ctx context.Context, req payment.RefundQueryRequest
 		}
 		return nil, fmt.Errorf("alipay query refund: %w", err)
 	}
+	if result == nil {
+		return nil, fmt.Errorf("alipay query refund: empty response")
+	}
+	// Gateway answered without an error object but with a failure code (e.g. the
+	// out_request_no does not belong to this trade). Treating that as "pending"
+	// would leave the refund waiting forever on a request the gateway rejected.
+	if result.IsFailure() {
+		return nil, fmt.Errorf("alipay query refund failed: %s", result.Error.Error())
+	}
 
 	status := payment.ProviderStatusPending
-	if result != nil && result.RefundStatus == alipayRefundStatusSuccess {
+	if result.RefundStatus == alipayRefundStatusSuccess {
 		status = payment.ProviderStatusSuccess
 	}
 
@@ -428,21 +490,39 @@ func (a *Alipay) CancelPayment(ctx context.Context, tradeNo string) error {
 		return err
 	}
 
-	_, err = client.TradeClose(ctx, alipay.TradeClose{OutTradeNo: tradeNo})
+	result, err := client.TradeClose(ctx, alipay.TradeClose{OutTradeNo: tradeNo})
 	if err != nil {
 		if isTradeNotExist(err) {
+			// Already gone upstream: closing is idempotent, so this is a success.
 			return nil
 		}
 		return fmt.Errorf("alipay TradeClose: %w", err)
 	}
+	// A business failure here arrives as a nil Go error. Treating a rejected
+	// close as success would leave the caller believing the trade can no longer
+	// be paid, when in fact it is still open.
+	if result != nil && result.IsFailure() {
+		if result.SubCode == alipayErrTradeNotExist {
+			return nil
+		}
+		return fmt.Errorf("alipay TradeClose failed: %s", result.Error.Error())
+	}
 	return nil
 }
 
+// isTradeNotExist reports whether err is an Alipay gateway error whose sub_code
+// is ACQ.TRADE_NOT_EXIST.
+//
+// The SDK returns *alipay.Error from Client.decode for every gateway-level
+// failure, and alipay.Error.Error() renders only "<code> - <sub_msg>" — the
+// sub_code is never part of the message. Matching on the rendered string can
+// therefore never succeed, so the structured error is inspected instead.
 func isTradeNotExist(err error) bool {
-	if err == nil {
+	var apiErr *alipay.Error
+	if !errors.As(err, &apiErr) {
 		return false
 	}
-	return strings.Contains(err.Error(), alipayErrTradeNotExist)
+	return apiErr != nil && apiErr.SubCode == alipayErrTradeNotExist
 }
 
 func parseAlipayAmount(values ...string) (float64, error) {

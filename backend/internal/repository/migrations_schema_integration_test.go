@@ -217,6 +217,58 @@ func TestMigrationsRunner_AuthIdentityAndPaymentSchemaStayAligned(t *testing.T) 
 	requireIndex(t, tx, "payment_orders", "paymentorder_out_trade_no")
 	requirePartialUniqueIndexDefinition(t, tx, "payment_orders", "paymentorder_out_trade_no", "out_trade_no", "WHERE")
 	requireIndexAbsent(t, tx, "payment_orders", "paymentorder_out_trade_no_unique")
+
+	// 退款台账（253）：这些约束是退款正确性的最后一道防线，且只有在 PostgreSQL
+	// 上才被真正验证——单元测试跑在 SQLite 上，无法覆盖部分唯一索引与 ON CONFLICT
+	// 的 arbiter 推断行为。
+	requireColumn(t, tx, "payment_refunds", "status", "character varying", 30, false)
+	requireColumn(t, tx, "payment_refunds", "deduction_rollback_ok", "boolean", 0, false)
+	requireIndex(t, tx, "payment_refunds", "paymentrefund_order_id_refund_no")
+	requirePartialUniqueIndexDefinition(t, tx, "payment_refunds", "paymentrefund_order_id_refund_no", "order_id", "refund_no")
+	requireIndex(t, tx, "payment_refunds", "paymentrefund_order_id_active")
+	requirePartialUniqueIndexDefinition(t, tx, "payment_refunds", "paymentrefund_order_id_active", "order_id", "WHERE")
+	// 已退总额只在 SUCCEEDED 上汇总，PENDING/REFUNDING 不得占用额度。
+	requireIndex(t, tx, "payment_refunds", "paymentrefund_status")
+
+	// 履约重试计数（254）：审计计数被 (order_id, action) 唯一索引压在 1，重试上限
+	// 必须依赖这一列才真正生效。
+	requireColumn(t, tx, "payment_orders", "fulfillment_attempts", "integer", 0, false)
+	requireColumnDefaultContains(t, tx, "payment_orders", "fulfillment_attempts", "0")
+
+	// 订单结算币种（256）：此前只能从 provider_snapshot 反推，而快照只对
+	// Stripe/Airwallex/微信 写入 currency，支付宝与 EasyPay 只能回退默认币种。
+	requireColumn(t, tx, "payment_orders", "currency", "character varying", 3, false)
+	// 回填后不应再有空币种：空值会让读取路径退回快照推断。
+	requireNoEmptyPaymentOrderCurrency(t, tx)
+
+	// 热查询索引（255）。
+	requireIndex(t, tx, "payment_orders", "idx_payment_orders_provider_instance_id")
+	requireIndex(t, tx, "payment_orders", "idx_payment_orders_plan_id")
+	requireIndex(t, tx, "payment_audit_logs", "idx_payment_audit_logs_action_operator_created_at")
+
+	// 生产库的宽唯一索引必须保持原样。
+	//
+	// 曾经计划把它收窄为部分唯一索引（只覆盖一次性动作），但返利发放依赖
+	// ON CONFLICT (order_id, action)，而 PostgreSQL 无法把部分唯一索引推断为
+	// arbiter（除非在 ON CONFLICT 里重述谓词）。收窄会让返利幂等在生产上直接报错，
+	// 而 SQLite 不会发现。这条断言就是为了防止该方案被重新引入。
+	requirePartialUniqueIndexDefinition(
+		t,
+		tx,
+		"payment_audit_logs",
+		"idx_payment_audit_logs_order_action_uniq",
+		"order_id",
+		"action",
+	)
+	var auditIndexIsPartial bool
+	require.NoError(t, tx.QueryRowContext(context.Background(), `
+SELECT pg_get_indexdef(i.indexrelid) LIKE '%WHERE%'
+FROM pg_class idx
+JOIN pg_index i ON i.indexrelid = idx.oid
+WHERE idx.relname = 'idx_payment_audit_logs_order_action_uniq'
+`).Scan(&auditIndexIsPartial))
+	require.False(t, auditIndexIsPartial,
+		"the audit (order_id, action) unique index must stay unconditional: ON CONFLICT (order_id, action) cannot infer a partial index as arbiter")
 }
 
 func requireIndex(t *testing.T, tx *sql.Tx, table, index string) {
@@ -379,5 +431,23 @@ WHERE table_schema = 'public'
 		require.Equal(t, "YES", row.Nullable, "nullable mismatch for %s.%s", table, column)
 	} else {
 		require.Equal(t, "NO", row.Nullable, "nullable mismatch for %s.%s", table, column)
+	}
+}
+
+// requireNoEmptyPaymentOrderCurrency asserts migration 256 left no order with an
+// empty currency. An empty value would make PaymentOrderCurrency fall back to the
+// provider snapshot (or the default), which is exactly the pre-migration ambiguity
+// the column exists to remove.
+func requireNoEmptyPaymentOrderCurrency(t *testing.T, tx *sql.Tx) {
+	t.Helper()
+
+	var empty int
+	if err := tx.QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM payment_orders WHERE COALESCE(TRIM(currency), '') = ''`,
+	).Scan(&empty); err != nil {
+		t.Fatalf("count payment_orders with empty currency: %v", err)
+	}
+	if empty != 0 {
+		t.Fatalf("expected migration 256 to backfill every payment_orders.currency, found %d empty rows", empty)
 	}
 }

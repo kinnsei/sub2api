@@ -164,10 +164,44 @@ func extractOutTradeNo(rawBody, providerKey string) string {
 		if err := json.Unmarshal([]byte(rawBody), &payload); err == nil {
 			return strings.TrimSpace(payload.Data.Object.MerchantOrderID)
 		}
+	case payment.TypeStripe:
+		// Stripe events carry the merchant order id in the PaymentIntent
+		// metadata (`metadata.orderId`, set by the Stripe provider at creation
+		// time from the request's OrderID). Without this branch a deployment
+		// with two or more enabled Stripe instances cannot pin the event to the
+		// instance that actually created the PaymentIntent.
+		return extractStripeMetadataOrderID(rawBody)
 	}
-	// For other providers (Stripe, Alipay direct, WxPay direct), the registry
-	// typically has only one instance, so no instance lookup is needed.
+	// For other providers (Alipay direct, WxPay direct), the registry typically
+	// has only one instance, so no instance lookup is needed.
 	return ""
+}
+
+// extractStripeMetadataOrderID reads `data.object.metadata.orderId` from a
+// Stripe webhook event. Stripe payloads are JSON, but the caller may hand us
+// form-encoded or empty bodies (misconfigured endpoints, health probes), so any
+// parse failure or unexpected shape degrades to an empty result rather than an
+// error: an empty out_trade_no simply falls back to the registry-wide provider
+// lookup that all other unmatched payloads use.
+func extractStripeMetadataOrderID(rawBody string) string {
+	trimmed := strings.TrimSpace(rawBody)
+	if trimmed == "" || !strings.HasPrefix(trimmed, "{") {
+		return ""
+	}
+
+	var payload struct {
+		Data struct {
+			Object struct {
+				Metadata map[string]any `json:"metadata"`
+			} `json:"object"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(trimmed), &payload); err != nil {
+		return ""
+	}
+
+	orderID, _ := payload.Data.Object.Metadata["orderId"].(string)
+	return strings.TrimSpace(orderID)
 }
 
 func verifyNotificationWithProviders(ctx context.Context, providers []payment.Provider, rawBody string, headers map[string]string) (string, *payment.PaymentNotification, error) {

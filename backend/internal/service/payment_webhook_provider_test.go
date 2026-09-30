@@ -508,3 +508,89 @@ func TestGetWebhookProviderUsesProviderSnapshotBeforeWxpayFallback(t *testing.T)
 	require.Len(t, providers, 1)
 	require.Equal(t, payment.TypeWxpay, providers[0].ProviderKey())
 }
+
+// TestGetWebhookProvidersPinsStripeEventToOrderInstance reproduces the
+// multi-instance Stripe routing defect: the Stripe webhook body carries the
+// merchant order id in `data.object.metadata.orderId`, and the handler must feed
+// it back into the provider lookup so the event is verified by the instance that
+// created the PaymentIntent rather than being rejected as ambiguous.
+func TestGetWebhookProvidersPinsStripeEventToOrderInstance(t *testing.T) {
+	ctx := context.Background()
+	client := newPaymentConfigServiceTestClient(t)
+
+	instA, err := client.PaymentProviderInstance.Create().
+		SetProviderKey(payment.TypeStripe).
+		SetName("stripe-a").
+		SetConfig(encryptWebhookProviderConfig(t, map[string]string{"secretKey": "sk_test_stripe_a", "currency": "CNY"})).
+		SetSupportedTypes("stripe").
+		SetEnabled(true).
+		Save(ctx)
+	require.NoError(t, err)
+	_, err = client.PaymentProviderInstance.Create().
+		SetProviderKey(payment.TypeStripe).
+		SetName("stripe-b").
+		SetConfig(encryptWebhookProviderConfig(t, map[string]string{"secretKey": "sk_test_stripe_b", "currency": "USD"})).
+		SetSupportedTypes("stripe").
+		SetEnabled(true).
+		Save(ctx)
+	require.NoError(t, err)
+
+	user, err := client.User.Create().
+		SetEmail("stripe-webhook@example.com").
+		SetPasswordHash("hash").
+		SetUsername("stripe-webhook").
+		Save(ctx)
+	require.NoError(t, err)
+
+	const outTradeNo = "sub2_test_stripe_multi_instance"
+	_, err = client.PaymentOrder.Create().
+		SetUserID(user.ID).
+		SetUserEmail(user.Email).
+		SetUserName(user.Username).
+		SetAmount(12).
+		SetPayAmount(12).
+		SetFeeRate(0).
+		SetRechargeCode("STRIPE-MULTI").
+		SetOutTradeNo(outTradeNo).
+		SetPaymentType(payment.TypeStripe).
+		SetPaymentTradeNo("").
+		SetOrderType(payment.OrderTypeBalance).
+		SetStatus(OrderStatusPending).
+		SetExpiresAt(time.Now().Add(time.Hour)).
+		SetClientIP("127.0.0.1").
+		SetSrcHost("api.example.com").
+		SetProviderInstanceID(strconv.FormatInt(instA.ID, 10)).
+		SetProviderSnapshot(map[string]any{
+			"schema_version":       1,
+			"provider_instance_id": strconv.FormatInt(instA.ID, 10),
+			"provider_key":         payment.TypeStripe,
+			"payment_mode":         "card",
+			"currency":             "CNY",
+		}).
+		Save(ctx)
+	require.NoError(t, err)
+
+	svc := &PaymentService{
+		entClient:       client,
+		loadBalancer:    newWebhookProviderTestLoadBalancer(client),
+		registry:        payment.NewRegistry(),
+		providersLoaded: true,
+	}
+
+	// Without a resolvable out_trade_no the lookup must refuse, because two
+	// enabled Stripe instances make the registry fallback ambiguous.
+	_, err = svc.GetWebhookProviders(ctx, payment.TypeStripe, "")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "ambiguous")
+
+	providers, err := svc.GetWebhookProviders(ctx, payment.TypeStripe, outTradeNo)
+	require.NoError(t, err)
+	require.Len(t, providers, 1)
+	require.Equal(t, payment.TypeStripe, providers[0].ProviderKey())
+
+	// Instance A is the only one configured with CNY, so the currency reported by
+	// the resolved provider proves the order (not merely the registry) was used.
+	identity, ok := providers[0].(payment.MerchantIdentityProvider)
+	require.True(t, ok, "expected the pinned provider to expose merchant identity, got %T", providers[0])
+	require.Equal(t, "CNY", identity.MerchantIdentityMetadata()["currency"])
+}

@@ -205,6 +205,86 @@ func TestFormatPEM(t *testing.T) {
 	}
 }
 
+func TestWxpayMerchantIdentityMetadata(t *testing.T) {
+	t.Parallel()
+
+	t.Run("reports base app id and merchant id", func(t *testing.T) {
+		t.Parallel()
+		prov := &Wxpay{config: map[string]string{
+			"appId": "wx-merchant-app",
+			"mchId": "1900000001",
+		}}
+		metadata := prov.MerchantIdentityMetadata()
+		if metadata[wxpayMetadataAppID] != "wx-merchant-app" {
+			t.Fatalf("appid = %q, want %q", metadata[wxpayMetadataAppID], "wx-merchant-app")
+		}
+		if metadata[wxpayMetadataMerchantID] != "1900000001" {
+			t.Fatalf("mchid = %q, want %q", metadata[wxpayMetadataMerchantID], "1900000001")
+		}
+		if _, ok := metadata[wxpayMetadataMPAppID]; ok {
+			t.Fatalf("mp_appid must be absent when no MP AppID is configured, got %+v", metadata)
+		}
+	})
+
+	// JSAPI orders settle under mpAppId, so a refund of such an order can only
+	// pass the snapshot identity check if the provider reports mpAppId too.
+	t.Run("reports dedicated MP app id for JSAPI orders", func(t *testing.T) {
+		t.Parallel()
+		prov := &Wxpay{config: map[string]string{
+			"appId":   "wx-merchant-app",
+			"mpAppId": "wx-mp-app",
+			"mchId":   "1900000001",
+		}}
+		metadata := prov.MerchantIdentityMetadata()
+		if metadata[wxpayMetadataAppID] != "wx-merchant-app" {
+			t.Fatalf("appid = %q, want %q", metadata[wxpayMetadataAppID], "wx-merchant-app")
+		}
+		if metadata[wxpayMetadataMPAppID] != "wx-mp-app" {
+			t.Fatalf("mp_appid = %q, want %q", metadata[wxpayMetadataMPAppID], "wx-mp-app")
+		}
+		if ResolveWxpayJSAPIAppID(prov.config) != metadata[wxpayMetadataMPAppID] {
+			t.Fatal("the reported MP AppID must be the AppID JSAPI prepay actually uses")
+		}
+	})
+
+	t.Run("nil provider and empty config return nil", func(t *testing.T) {
+		t.Parallel()
+		var nilProv *Wxpay
+		if got := nilProv.MerchantIdentityMetadata(); got != nil {
+			t.Fatalf("nil provider metadata = %+v, want nil", got)
+		}
+		empty := &Wxpay{config: map[string]string{}}
+		if got := empty.MerchantIdentityMetadata(); got != nil {
+			t.Fatalf("empty config metadata = %+v, want nil", got)
+		}
+	})
+
+	t.Run("blank values are ignored", func(t *testing.T) {
+		t.Parallel()
+		prov := &Wxpay{config: map[string]string{
+			"appId":   "  ",
+			"mpAppId": "  ",
+			"mchId":   " 1900000001 ",
+		}}
+		metadata := prov.MerchantIdentityMetadata()
+		if _, ok := metadata[wxpayMetadataAppID]; ok {
+			t.Fatalf("blank appid must not be reported, got %+v", metadata)
+		}
+		if _, ok := metadata[wxpayMetadataMPAppID]; ok {
+			t.Fatalf("blank mp_appid must not be reported, got %+v", metadata)
+		}
+		if metadata[wxpayMetadataMerchantID] != "1900000001" {
+			t.Fatalf("mchid = %q, want trimmed %q", metadata[wxpayMetadataMerchantID], "1900000001")
+		}
+	})
+
+	// The interface contract is what the refund path type-asserts on.
+	t.Run("satisfies payment.MerchantIdentityProvider", func(t *testing.T) {
+		t.Parallel()
+		var _ payment.MerchantIdentityProvider = (*Wxpay)(nil)
+	})
+}
+
 func TestNewWxpay(t *testing.T) {
 	t.Parallel()
 
